@@ -3,7 +3,7 @@
  * wlat.bt -- per-layer latency breakdown of BlueStore write transactions.
  *
  * Usage:  bpftrace wlat.bt <path-to-ceph-osd>
- *         e.g.  bpftrace wlat.bt /root/git/ceph/ceph/build/bin/ceph-osd
+ *         e.g. a dev build:  bpftrace wlat.bt <ceph-src>/build/bin/ceph-osd
  *         Wait for the banner line (wildcard probes take ~10 s to attach),
  *         run write workload, Ctrl-C.
  * Silent while tracing; Ctrl-C prints one latency histogram per stage
