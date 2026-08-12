@@ -26,6 +26,14 @@
 # order run with RBD_OBJ_SIZE=$((1 << order)).  Assumes default striping
 # (stripe_count=1); an IO crossing an object boundary reports the first
 # object it touches.
+#
+# Caveat: the probed functions (add_clat_sample, fio_rbd_queue,
+# _fio_rbd_finish_aiocb) are fio internals, not a stable API; a future
+# fio release may rename them or change their signature (as fio 3.39
+# already did for add_clat_sample's 5th argument, handled above).
+# Addresses and offsets are re-resolved per binary, so only such
+# source-level changes break the script; if they do, re-verify the
+# symbols and ABI assumptions against the fio being traced.
 
 set -u
 

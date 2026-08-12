@@ -26,6 +26,12 @@
  *
  * Ops that never reach log_op_stats (failed ops, replica ops on a
  * multi-OSD cluster) leave stale entries, cleared at END.
+ *
+ * Caveat: the probed functions (OpTracker::create_request,
+ * PrimaryLogPG::log_op_stats) are ceph internals, not a stable API;
+ * a future ceph release may rename them or change their signature.
+ * If a probe stops attaching or counting, re-verify these symbols
+ * against the ceph-osd binary being traced.
  */
 
 BEGIN

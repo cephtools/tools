@@ -38,6 +38,15 @@
  * falls through PREPARE -> AIO_WAIT inline and calls _txc_finish_io itself
  * (BlueStore.cc:14735), so the stage measures queue overhead, not the
  * device.  The data rides inside the kv commit and hits disk after the reply.
+ *
+ * Caveat: all probed functions (BlueStore::queue_transactions, the
+ * _txc_* state-machine steps, OpTracker::create_request,
+ * PrimaryLogPG::log_op_stats) are ceph internals, not a stable API;
+ * a future ceph release may rename them, change signatures, or
+ * restructure the txc state machine.  If a probe stops attaching --
+ * or the END report's stage sum no longer matches the directly
+ * measured client latency -- re-verify these symbols against the
+ * ceph-osd binary being traced.
  */
 
 BEGIN
