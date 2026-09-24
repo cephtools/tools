@@ -1,0 +1,1410 @@
+diff --git a/src/test/objectstore/hybrid_allocator_test.cc b/src/test/objectstore/hybrid_allocator_test.cc
+index 4157d5bb22e..017dc9153f6 100755
+--- a/src/test/objectstore/hybrid_allocator_test.cc
++++ b/src/test/objectstore/hybrid_allocator_test.cc
+@@ -24,6 +24,9 @@ public:
+   uint64_t get_avl_free() {
+     return AvlAllocator::get_free();
+   }
++  bool has_bmap() {
++    return get_bmap() != nullptr;
++  }
+ };
+ 
+ const uint64_t _1m = 1024 * 1024;
+@@ -288,3 +291,54 @@ TEST(HybridAllocator, fragmentation)
+     ASSERT_EQ(0.5 * 7 / 8 + 1.0 / 8, ha.get_fragmentation());
+   }
+ }
++
++// Online expand (BlueStore::expand_devices) calls alloc->expand(new) and then
++// alloc->init_add_free(old, new - old).  Once the hybrid allocator has spilled
++// over into its bitmap fallback, expand() also marks [old, new) free in the
++// bitmap, so the new range ends up free in BOTH the tree and the bitmap and
++// can be handed out twice.
++TEST(HybridAllocator, expand_after_spillover)
++{
++  uint64_t block_size = 0x1000;
++  uint64_t capacity = 0x100 * _1m; // 256MB
++  TestHybridAllocator ha(g_ceph_context, capacity, block_size,
++    4 * sizeof(range_seg_t), "test_hybrid_allocator");
++
++  // fragmented free space to force spillover into the bitmap
++  for (uint64_t o = 0; o < 16 * _1m; o += 2 * 0x1000) {
++    ha.init_add_free(o, 0x1000);
++  }
++  ASSERT_TRUE(ha.has_bmap());
++  uint64_t free_before = ha.get_free();
++
++  // same sequence as BlueStore::expand_devices() online path
++  ha.expand(2 * capacity);
++  ha.init_add_free(capacity, capacity);
++
++  // free space must grow by exactly the added range
++  EXPECT_EQ(free_before + capacity, ha.get_free());
++
++  // no byte may be reported free twice
++  std::map<uint64_t, uint64_t> seen;
++  uint64_t overlap = 0;
++  ha.foreach([&](uint64_t o, uint64_t l) {
++    for (uint64_t p = o; p < o + l; p += block_size) {
++      if (seen[p]++) overlap += block_size;
++    }
++  });
++  EXPECT_EQ(0u, overlap) << "bytes free in both tree and bitmap";
++
++  // allocate everything: no extent may be handed out twice
++  PExtentVector all;
++  int64_t got;
++  while ((got = ha.allocate(capacity, block_size, capacity, 0, &all)) > 0) {
++  }
++  std::map<uint64_t, uint64_t> owned;
++  uint64_t dup = 0;
++  for (auto& e : all) {
++    for (uint64_t p = e.offset; p < e.offset + e.length; p += block_size) {
++      if (owned[p]++) dup += block_size;
++    }
++  }
++  EXPECT_EQ(0u, dup) << "bytes allocated twice";
++}
+diff --git a/src/test/objectstore/store_test.cc b/src/test/objectstore/store_test.cc
+index d1b8f55feb0..8313adeb8fa 100644
+--- a/src/test/objectstore/store_test.cc
++++ b/src/test/objectstore/store_test.cc
+@@ -17,6 +17,7 @@
+ #include <glob.h>
+ #include <kv/KeyValueDB.h>
+ #include <stdio.h>
++#include <regex>
+ #include <string.h>
+ #include <iostream>
+ #include <memory>
+@@ -12272,6 +12273,1115 @@ TEST_P(UnsharingBlobsOnRemove, UnshareOnPartial) {
+   cleanup_store();
+ }
+ 
++// BUG: online BlueStore::expand_devices() writes a new bdev label copy at every
++// label position (1G/10G/100G/1000G) that falls into the grown range, but then
++// hands the whole new range to the allocator via init_add_free() without
++// reserving the label blocks (only _main_bdev_label_try_reserve() at mount does
++// that).  Object data can be allocated on top of the label, and any later
++// label rewrite (write_meta, next expand) overwrites object data.
++TEST_P(MultiLabelTest, OnlineExpandReservesNewLabel) {
++  static constexpr uint64_t _1M = 1024 * 1024;
++  static constexpr uint64_t _1G = 1024 * _1M;
++  SetVal(g_conf(), "bluestore_block_size", stringify(900 * _1M).c_str());
++  SetVal(g_conf(), "bluestore_bdev_label_multi", "true");
++  SetVal(g_conf(), "bluestore_debug_inject_allocation_from_file_failure", "0");
++  g_conf().apply_changes(nullptr);
++  DeferredSetup();
++  if (!bdev_supports_label()) {
++    GTEST_SKIP();
++  }
++  BlueStore* bstore = dynamic_cast<BlueStore*>(store.get());
++  ASSERT_NE(nullptr, bstore);
++  string block = get_data_dir() + "/block";
++
++  // grow the backing file and expand ONLINE (store stays mounted)
++  ASSERT_EQ(0, ::truncate(block.c_str(), 3 * _1G));
++  {
++    stringstream ss;
++    ASSERT_EQ(0, bstore->expand_devices(ss));
++    cout << ss.str();
++  }
++  bluestore_bdev_label_t label;
++  ASSERT_EQ(0, BlueStore::read_bdev_label_at_pos(g_ceph_context, block, _1G, &label))
++    << "expand did not write the label at 1G";
++
++  coll_t cid;
++  auto ch = store->create_new_collection(cid);
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  // fill ~1.6G so that the region around 1G gets allocated
++  const int nobj = 400;
++  const uint64_t osize = 4 * _1M;
++  auto make_bl = [&](int i) {
++    bufferlist bl;
++    bl.append(std::string(osize, char('A' + (i % 26))));
++    return bl;
++  };
++  for (int i = 0; i < nobj; i++) {
++    ObjectStore::Transaction t;
++    ghobject_t hoid(hobject_t(sobject_t("OBJ-" + stringify(i), CEPH_NOSNAP)));
++    t.write(cid, hoid, 0, osize, make_bl(i));
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  // (a) object data must not have been placed over the label
++  EXPECT_EQ(0, BlueStore::read_bdev_label_at_pos(g_ceph_context, block, _1G, &label))
++    << "object data overwrote the bdev label at 1G";
++
++  // (b) rewriting labels must not clobber object data
++  ASSERT_EQ(0, bstore->write_meta("bughunt_key", "bughunt_value"));
++
++  ch.reset();
++  umount();          // NCB: _main_bdev_label_remove() + allocation file
++  ASSERT_EQ(0, mount()) << "mount failed after online expand";
++  ch = store->open_collection(cid);
++  int bad = 0;
++  for (int i = 0; i < nobj; i++) {
++    ghobject_t hoid(hobject_t(sobject_t("OBJ-" + stringify(i), CEPH_NOSNAP)));
++    bufferlist got;
++    int r = store->read(ch, hoid, 0, osize, got);
++    if (r != (int)osize || !got.contents_equal(make_bl(i))) {
++      cout << "object OBJ-" << i << " corrupted, read r=" << r << std::endl;
++      ++bad;
++    }
++  }
++  EXPECT_EQ(0, bad) << "objects corrupted by label write";
++  ch.reset();
++  umount();
++  EXPECT_EQ(0, store->fsck(false));
++  ASSERT_EQ(0, mount());
++}
++
++// BUG (config): bluestore_max_blob_size{,_hdd,_ssd} accept 0 ("no limit" per the
++// option doc), but with bluestore_write_v2=true Writer::_split_data() divides by
++// wctx->target_blob_size, which is 0 -> SIGFPE on the first uncompressed write.
++TEST_P(StoreTestSpecificAUSize, ZeroMaxBlobSizeWriteV2) {
++  if (string(GetParam()) != "bluestore")
++    GTEST_SKIP();
++  SetVal(g_conf(), "bluestore_write_v2", "true");
++  SetVal(g_conf(), "bluestore_max_blob_size", "0");
++  SetVal(g_conf(), "bluestore_max_blob_size_hdd", "0");
++  SetVal(g_conf(), "bluestore_max_blob_size_ssd", "0");
++  SetVal(g_conf(), "bluestore_compression_mode", "none");
++  g_conf().apply_changes(nullptr);
++  StartDeferred(4096);
++
++  coll_t cid;
++  ghobject_t hoid(hobject_t(sobject_t("Object 1", CEPH_NOSNAP)));
++  auto ch = store->create_new_collection(cid);
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  bufferlist bl;
++  bl.append(std::string(65536, 'x'));
++  {
++    ObjectStore::Transaction t;
++    t.write(cid, hoid, 0, bl.length(), bl);
++    cout << "writing with max_blob_size=0 and write_v2..." << std::endl;
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  bufferlist got;
++  ASSERT_EQ(65536, store->read(ch, hoid, 0, 65536, got));
++  ASSERT_TRUE(got.contents_equal(bl));
++}
++
++// Candidate B16: write_v2 may reuse space released in the same txn as a
++// *deferred* target and mark the rest of the AU "unused"; a later small write
++// into that unused part is issued as direct I/O and can be overwritten by an
++// older, still-queued deferred write to the same disk bytes.
++static void do_deferred_reuse_race(StoreTestSpecificAUSize* self,
++                                   ObjectStore* store,
++                                   ObjectStore::CollectionHandle& ch,
++                                   const coll_t& cid,
++                                   std::function<void()> remount)
++{
++  ghobject_t hoid(hobject_t(sobject_t("RaceObj", CEPH_NOSNAP)));
++  auto fill = [](size_t len, char c) {
++    bufferlist bl; bl.append(std::string(len, c)); return bl;
++  };
++  auto wr = [&](uint64_t off, bufferlist bl) {
++    ObjectStore::Transaction t;
++    t.write(cid, hoid, off, bl.length(), bl);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  };
++  wr(0, fill(16384, 'A'));                 // blob X, one 16K AU
++  wr(8192, fill(4096, 'B'));               // deferred overwrite into X
++  {
++    ObjectStore::Transaction t;
++    t.zero(cid, hoid, 4096, 12288);        // X keeps only [0,4K)
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  wr(0, fill(4096, 'C'));                  // X's AU released -> reused
++  wr(8192, fill(4096, 'D'));               // into unused part of new blob
++  bufferlist expected;
++  expected.append(fill(4096, 'C'));
++  expected.append_zero(4096);
++  expected.append(fill(4096, 'D'));
++  remount();
++  bufferlist got;
++  int r = store->read(ch, hoid, 0, 12288, got);
++  EXPECT_EQ(12288, r);
++  if (r == 12288) {
++    EXPECT_TRUE(got.contents_equal(expected)) << "stale data after remount";
++    if (!got.contents_equal(expected)) {
++      cout << "byte@8K='" << got[8192] << "' (want 'D')" << std::endl;
++    }
++  }
++}
++
++#define DEFERRED_REUSE_SETUP(v2)                                          \
++  SetVal(g_conf(), "bluestore_write_v2", (v2) ? "true" : "false");         \
++  SetVal(g_conf(), "bluestore_prefer_deferred_size", "65536");            \
++  SetVal(g_conf(), "bluestore_deferred_batch_ops", "1000");               \
++  SetVal(g_conf(), "bluestore_max_defer_interval", "1000");               \
++  SetVal(g_conf(), "bluestore_compression_mode", "none");                 \
++  SetVal(g_conf(), "bluestore_debug_randomize_serial_transaction", "0");  \
++  g_conf().apply_changes(nullptr);
++
++TEST_P(StoreTestSpecificAUSize, DeferredReuseRaceV1) {
++  if (string(GetParam()) != "bluestore")
++    GTEST_SKIP();
++  DEFERRED_REUSE_SETUP(false);
++  StartDeferred(16384);
++  coll_t cid;
++  auto ch = store->create_new_collection(cid);
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  do_deferred_reuse_race(this, store.get(), ch, cid, [&]() {
++    ch.reset();
++    ASSERT_EQ(0, store->umount());
++    ASSERT_EQ(0, store->mount());
++    ch = store->open_collection(cid);
++  });
++}
++
++TEST_P(StoreTestSpecificAUSize, DeferredReuseRaceV2) {
++  if (string(GetParam()) != "bluestore")
++    GTEST_SKIP();
++  DEFERRED_REUSE_SETUP(true);
++  StartDeferred(16384);
++  coll_t cid;
++  auto ch = store->create_new_collection(cid);
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  do_deferred_reuse_race(this, store.get(), ch, cid, [&]() {
++    ch.reset();
++    ASSERT_EQ(0, store->umount());
++    ASSERT_EQ(0, store->mount());
++    ch = store->open_collection(cid);
++  });
++}
++
++
++// ===== candidate: clone-range-dup-writing-offset
++// Add to src/test/objectstore/store_test.cc
++//
++// clone_range(src, dst, srcoff, len, dstoff) with srcoff != dstoff while the
++// source still has in-flight ("writing") buffers from the same transaction.
++// ExtentMap::dup()/dup_esb() call oldo->bc._dup_writing(..., dstoff, length),
++// which scans the SOURCE buffer space at [dstoff, dstoff+len) (instead of
++// [srcoff, srcoff+len)) and installs the buffers in the DEST at their source
++// offsets.  With buffered writes the bogus buffer becomes CLEAN in dst's
++// cache and is served by every later read until eviction/remount.
++TEST_P(StoreTest, CloneRangeShiftedWithWritingBuffers) {
++  if (string(GetParam()) != "bluestore")
++    GTEST_SKIP();
++  int r;
++  coll_t cid;
++  auto ch = store->create_new_collection(cid);
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  ghobject_t src(hobject_t(sobject_t("CRsrc", CEPH_NOSNAP)));
++  ghobject_t dst(hobject_t(sobject_t("CRdst", CEPH_NOSNAP)));
++  src.hobj.pool = -1;
++  dst.hobj.pool = -1;
++
++  const unsigned half = 0x10000;
++  bufferlist a, b, data;
++  a.append(std::string(half, 'A'));
++  b.append(std::string(half, 'B'));
++  data.append(a);
++  data.append(b);
++  {
++    // One transaction: the src write is still "writing" when clone_range runs.
++    ObjectStore::Transaction t;
++    t.write(cid, src, 0, data.length(), data,
++            CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
++    t.touch(cid, dst);
++    // copy src[0, 64K) ('A') to dst[64K, 128K)
++    t.clone_range(cid, src, dst, 0, half, half);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    bufferlist got;
++    r = store->read(ch, dst, half, half, got);
++    ASSERT_EQ((int)half, r);
++    // buggy code returns 'B' (src[64K,128K)) from dst's buffer cache
++    ASSERT_TRUE(bl_eq(a, got)) << "dst[64K,128K) served stale/wrong data from cache";
++  }
++  {
++    bufferlist got;
++    r = store->read(ch, dst, 0, half, got);
++    ASSERT_EQ((int)half, r);
++    ASSERT_TRUE(got.is_zero());
++  }
++  // after remount the on-disk mapping is used: correct 'A' either way
++  ch.reset();
++  ASSERT_EQ(0, store->umount());
++  ASSERT_EQ(0, store->mount());
++  ch = store->open_collection(cid);
++  {
++    bufferlist got;
++    r = store->read(ch, dst, half, half, got);
++    ASSERT_EQ((int)half, r);
++    ASSERT_TRUE(bl_eq(a, got));
++  }
++  {
++    ObjectStore::Transaction t;
++    t.remove(cid, src);
++    t.remove(cid, dst);
++    t.remove_collection(cid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++}
++
++// ===== candidate: pool-compression-alg-none-ignored
++// Add to src/test/objectstore/store_test.cc
++//
++// Pool option compression_algorithm=none must disable compression for that
++// pool (pre-a6a499ed5fc behaviour: Compressor::create(cct,"none") == nullptr
++// -> no compressor).  Since a6a499ed5fc set_collection_opts() ignores the
++// value "none" (leaves c->compression_algorithm unset) and
++// _choose_write_options() falls back to the global
++// bluestore_compression_algorithm, so data IS compressed.
++TEST_P(StoreTestSpecificAUSize, PoolCompressionAlgorithmNoneHonored) {
++  if (string(GetParam()) != "bluestore")
++    GTEST_SKIP();
++  SetVal(g_conf(), "bluestore_write_v2", "false");
++  SetVal(g_conf(), "bluestore_compression_mode", "force");
++  SetVal(g_conf(), "bluestore_compression_algorithm", "lz4");
++  g_conf().apply_changes(nullptr);
++  StartDeferred(4096);
++
++  // pool A: no per-pool algorithm (control, must compress with global lz4)
++  // pool B: compression_algorithm=none (must NOT compress)
++  auto run = [&](int poolid, bool set_none) -> store_statfs_t {
++    coll_t cid = coll_t(spg_t(pg_t(0, poolid), shard_id_t::NO_SHARD));
++    ghobject_t hoid(hobject_t(sobject_t("CompNone", CEPH_NOSNAP),
++                              string(), 0, poolid, string()));
++    auto ch = store->create_new_collection(cid);
++    {
++      ObjectStore::Transaction t;
++      t.create_collection(cid, 0);
++      EXPECT_EQ(0, queue_transaction(store, ch, std::move(t)));
++    }
++    if (set_none) {
++      pool_opts_t opts;
++      opts.set(pool_opts_t::COMPRESSION_ALGORITHM, std::string("none"));
++      EXPECT_EQ(0, store->set_collection_opts(ch, opts));
++    }
++    {
++      ObjectStore::Transaction t;
++      bufferlist bl;
++      bl.append(std::string(0x40000, 'a'));   // highly compressible
++      t.write(cid, hoid, 0, bl.length(), bl);
++      EXPECT_EQ(0, queue_transaction(store, ch, std::move(t)));
++    }
++    store_statfs_t st;
++    bool per_pool_omap;
++    EXPECT_EQ(0, store->pool_statfs(poolid, &st, &per_pool_omap));
++    return st;
++  };
++  store_statfs_t a = run(4373, false);
++  store_statfs_t b = run(4374, true);
++  cout << "control pool compressed_original=0x" << std::hex
++       << a.data_compressed_original << " none-pool compressed_original=0x"
++       << b.data_compressed_original << std::dec << std::endl;
++  ASSERT_EQ(0x40000, a.data_compressed_original) << "control did not compress; lz4 unavailable?";
++  EXPECT_EQ(0, b.data_compressed_original) << "pool compression_algorithm=none ignored";
++}
++
++// ===== candidate: v1-small-write-fault-range-4g-wrap
++// Add to src/test/objectstore/store_test.cc
++//
++// v1 write path: _do_write_small() faults [offset - max_bsize, offset + max_bsize)
++// via ExtentMap::fault_range(uint32 offset, uint32 length).  For a legal write
++// close to OBJECT_MAX_SIZE (offset+length < 0xffffffff) offset + max_bsize
++// exceeds 2^32; inside fault_range() "offset + length" wraps (uint32) and
++// seek_shard(wrapped) returns shard 0 while seek_shard(offset) returns the last
++// shard -> maybe_load_shard(): FAILED ceph_assert(last >= start).
++TEST_P(StoreTestSpecificAUSize, SmallWriteNear4GiBShardedOnode) {
++  if (string(GetParam()) != "bluestore")
++    GTEST_SKIP();
++  SetVal(g_conf(), "bluestore_write_v2", "false");
++  StartDeferred(4096);
++
++  int r;
++  coll_t cid;
++  ghobject_t hoid(hobject_t(sobject_t("Near4G", CEPH_NOSNAP)));
++  hoid.hobj.pool = -1;
++  auto ch = store->create_new_collection(cid);
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  // Build an extent map large enough to be sharded (> shard_max_size bytes),
++  // placed well above 0 so that shard 0 covers [0, ~1MiB) and the shard that
++  // covers the top of the object is not shard 0.
++  bufferlist bl4k;
++  bl4k.append(std::string(0x1000, 'x'));
++  for (unsigned batch = 0; batch < 6; ++batch) {
++    ObjectStore::Transaction t;
++    for (unsigned i = 0; i < 100; ++i) {
++      uint64_t off = 0x100000 + (batch * 100 + i) * 0x2000;
++      t.write(cid, hoid, off, bl4k.length(), bl4k);
++    }
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  // force the onode to be reloaded from disk so shards are really used
++  ch.reset();
++  ASSERT_EQ(0, store->umount());
++  ASSERT_EQ(0, store->mount());
++  ch = store->open_collection(cid);
++  {
++    BlueStore* bstore = dynamic_cast<BlueStore*>(store.get());
++    ASSERT_NE(nullptr, bstore);
++  }
++
++  // small (< min_alloc_size) write near the 4GiB limit; legal for _write()
++  const uint64_t off = 0xffffe000;
++  bufferlist small;
++  small.append(std::string(0x800, 'y'));
++  ASSERT_LT(off + small.length(), 0xffffffffull);
++  {
++    ObjectStore::Transaction t;
++    t.write(cid, hoid, off, small.length(), small);
++    r = queue_transaction(store, ch, std::move(t));   // buggy: OSD asserts here
++    ASSERT_EQ(r, 0);
++  }
++  {
++    bufferlist got;
++    r = store->read(ch, hoid, off, small.length(), got);
++    ASSERT_EQ((int)small.length(), r);
++    ASSERT_TRUE(bl_eq(small, got));
++  }
++  {
++    ObjectStore::Transaction t;
++    t.remove(cid, hoid);
++    t.remove_collection(cid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++}
++
++// ===== candidate: sb-repair-first-pextent-only
++// Add to src/test/objectstore/store_test.cc (after BluestoreRepairSharedBlobTest)
++//
++// _fsck_repair_shared_blobs() rebuilds the ref_map of a broken shared blob by
++// walking all objects, but the 2nd _fsck_foreach_shared_blob() lambda does
++//     for (auto& p : b.get_extents()) { if (p.is_valid()) { get(p); break; } }
++// i.e. it only references the FIRST valid pextent of every blob
++// (BlueStore.cc:10103-10108, regression from a902d22b6c78).  For a shared blob
++// with >1 valid pextent the rewritten SharedBlob record lacks the other
++// extents: repair reports success, a following fsck still finds ref
++// mismatches, and later put_ref() on the missing ranges hits
++// "put on missing extent".
++//
++// Same setup as BluestoreRepairSharedBlobTest but WITHOUT the two zero() ops,
++// so both the head and the clone keep a blob with two valid pextents.
++TEST_P(StoreTestSpecificAUSize, BluestoreRepairSharedBlobMultiPextent) {
++  if (string(GetParam()) != "bluestore")
++    return;
++
++  SetVal(g_conf(), "bluestore_fsck_on_mount", "false");
++  SetVal(g_conf(), "bluestore_fsck_on_umount", "false");
++  SetVal(g_conf(), "bluestore_allocator", "avl");
++
++  const size_t block_size = 0x1000;
++  StartDeferred(block_size);
++
++  BlueStore* bstore = dynamic_cast<BlueStore*> (store.get());
++
++  const uint64_t pool = 555;
++  coll_t cid(spg_t(pg_t(0, pool), shard_id_t::NO_SHARD));
++  auto ch = store->create_new_collection(cid);
++
++  ghobject_t hoid = make_object("Object 1", pool);
++  ghobject_t hoid_cloned = hoid;
++  hoid_cloned.hobj.snap = 1;
++  ghobject_t hoid2 = make_object("Object 2", pool);
++
++  string s(block_size, 1);
++  bufferlist bl;
++  bl.append(s);
++  int r;
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    ObjectStore::Transaction t;
++    t.write(cid, hoid, 0, bl.length(), bl);
++    t.write(cid, hoid2, 0, bl.length(), bl); // make a gap in allocations
++    t.write(cid, hoid, block_size * 2 , bl.length(), bl);
++    t.clone(cid, hoid, hoid_cloned);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  ch.reset(nullptr);
++  bstore->umount();
++  cout << "baseline fsck " << bstore->fsck(false) << std::endl;
++  bstore->mount();
++  {
++    bufferlist bl;
++    string key;
++    _key_encode_u64(1, &key);
++    bluestore_shared_blob_t sb(1);
++    int r = bstore->get_shared_blob(key, bl);
++    ASSERT_EQ(r, 0);
++    decode(sb, bl);
++    cout << "original " << sb.ref_map << std::endl;
++    // precondition: one shared blob with two separate physical extents
++    ASSERT_EQ(sb.ref_map.ref_map.size(), 2u);
++    auto it = sb.ref_map.ref_map.begin();
++    it++;
++    sb.ref_map.get(it->first, block_size);   // corrupt: extra ref on 2nd pextent
++    cout << "injected " << sb.ref_map << std::endl;
++    bl.clear();
++    encode(sb, bl);
++    bstore->inject_broken_shared_blob_key(key, bl);
++  }
++  bstore->umount();
++  ASSERT_GT(bstore->fsck(false), 0);
++  ASSERT_EQ(bstore->repair(false), 0);     // repair claims success
++  bstore->mount();
++  {
++    bufferlist bl;
++    string key;
++    _key_encode_u64(1, &key);
++    bluestore_shared_blob_t sb(1);
++    ASSERT_EQ(bstore->get_shared_blob(key, bl), 0);
++    decode(sb, bl);
++    cout << "after repair " << sb.ref_map << std::endl;
++    // expected: both pextents present with refs == 2 (head + clone)
++    EXPECT_EQ(sb.ref_map.ref_map.size(), 2u);
++  }
++  bstore->umount();
++  // BUG: prints "shared blob references aren't matching" -> non-zero
++  EXPECT_EQ(bstore->fsck(false), 0);
++  bstore->mount();
++}
++
++// ===== candidate: misref-repair-into-false-free
++// Add to src/test/objectstore/store_test.cc (after BluestoreRepairTest)
++//
++// fsck repair fixes misreferenced extents (BlueStore.cc:~11560-11760) BEFORE it
++// checks the freelist ("checking freelist vs allocated", ~11918).  The rewrite
++// allocates new space from `alloc`, which was initialised from the (corrupt)
++// freelist, so it can pick blocks that are "false free" – i.e. still in use by
++// another object – and bdev->write()s the copied blob over that object's data.
++// Afterwards fix_false_free() and the misref txn both fm->allocate() the same
++// blocks; BitmapFreelistManager is XOR based, so the block ends up FREE again.
++//
++// Scenario: object C written first (lowest AU), its AU falsely freed, plus a
++// misreference between hoid and hoid_dup. After repair C must be intact and
++// fsck must be clean.
++TEST_P(StoreTestSpecificAUSize, BluestoreRepairMisrefIntoFalseFree) {
++  if (string(GetParam()) != "bluestore")
++    return;
++  const size_t au = 0x10000;
++
++  SetVal(g_conf(), "bluestore_block_db_create", "true");
++  SetVal(g_conf(), "bluestore_block_db_size", "4294967296");
++  SetVal(g_conf(), "bluestore_allocation_from_file", "false"); // bitmap FM
++  SetVal(g_conf(), "bluestore_allocator", "avl");
++  SetVal(g_conf(), "bluestore_fsck_on_mount", "false");
++  SetVal(g_conf(), "bluestore_fsck_on_umount", "false");
++  SetVal(g_conf(), "bluestore_max_blob_size", stringify(au).c_str());
++
++  StartDeferred(au);
++
++  BlueStore* bstore = dynamic_cast<BlueStore*> (store.get());
++  ASSERT_FALSE(bstore->has_null_manager());
++
++  const uint64_t pool = 555;
++  coll_t cid(spg_t(pg_t(0, pool), shard_id_t::NO_SHARD));
++  auto ch = store->create_new_collection(cid);
++
++  ghobject_t hoidC = make_object("Object C (victim)", pool);
++  ghobject_t hoid = make_object("Object 1", pool);
++  ghobject_t hoid_dup = make_object("Object 1(dup)", pool);
++  bufferlist blC, blA, blB;
++  blC.append(string(au, 'C'));
++  blA.append(string(au, 'A'));
++  blB.append(string(au, 'B'));
++  int r;
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    t.write(cid, hoidC, 0, blC.length(), blC);   // gets the lowest data AU
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    ObjectStore::Transaction t;
++    t.write(cid, hoid, 0, blA.length(), blA);
++    t.write(cid, hoid_dup, 0, blB.length(), blB);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  ch.reset(nullptr);
++  bstore->umount();
++  ASSERT_EQ(bstore->fsck(false), 0);
++  bstore->mount();
++  bstore->inject_false_free(cid, hoidC);
++  bstore->inject_misreference(cid, hoid, cid, hoid_dup, 0);
++  bstore->umount();
++
++  int errs = bstore->fsck(false);
++  cout << "fsck before repair: " << errs << std::endl;
++  ASSERT_GT(errs, 0);
++  int rr = bstore->repair(false);
++  cout << "repair returned: " << rr << std::endl;
++
++  ASSERT_EQ(bstore->mount(), 0);
++  ch = store->open_collection(cid);
++  {
++    bufferlist out;
++    r = store->read(ch, hoidC, 0, au, out);
++    cout << "read victim C: r=" << r << " first byte="
++         << (out.length() ? out.c_str()[0] : '?') << std::endl;
++    EXPECT_EQ(r, (int)au);
++    EXPECT_TRUE(out.contents_equal(blC)) << "victim object C was overwritten by repair";
++  }
++  ch.reset(nullptr);
++  bstore->umount();
++  int errs2 = bstore->fsck(false);
++  cout << "fsck after repair: " << errs2 << std::endl;
++  EXPECT_EQ(errs2, 0);
++  bstore->mount();
++}
++
++// ===== candidate: rmcoll-missing-nullderef
++// Candidate: BlueStore::_remove_collection dereferences the CollectionRef
++// ((*c)->flush_all_but_last()) BEFORE its own "if (!*c) return -ENOENT"
++// check, so OP_RMCOLL on a collection that does not exist segfaults instead
++// of failing with -ENOENT.
++// Paste inside #ifdef WITH_BLUESTORE near the end of store_test.cc.
++TEST_P(StoreTest, RemoveMissingCollectionENOENT) {
++  if (string(GetParam()) != "bluestore")
++    return;
++  SetVal(g_conf(), "objectstore_debug_throw_on_failed_txc", "true");
++  g_conf().apply_changes(nullptr);
++  coll_t cid(spg_t(pg_t(0, 782), shard_id_t::NO_SHARD));
++  coll_t missing(spg_t(pg_t(1, 782), shard_id_t::NO_SHARD));
++  auto ch = store->create_new_collection(cid);
++  int r;
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  ASSERT_FALSE(store->collection_exists(missing));
++  {
++    ObjectStore::Transaction t;
++    t.remove_collection(missing);
++    int thrown = 0;
++    try {
++      store->queue_transaction(ch, std::move(t));  // buggy: SIGSEGV here
++    } catch (int e) {
++      thrown = e;
++    }
++    EXPECT_EQ(-ENOENT, thrown);
++  }
++  SetVal(g_conf(), "objectstore_debug_throw_on_failed_txc", "false");
++  g_conf().apply_changes(nullptr);
++  {
++    ObjectStore::Transaction t;
++    t.remove_collection(cid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++}
++
++// ===== candidate: rename-perpg-omap-hash
++// Candidate: _rename keeps the onode nid but per-pg omap keys embed the
++// object's hash (Onode::calc_omap_key uses o->oid.hobj.get_bitwise_key_u32()).
++// Renaming to an oid with a different hash orphans the omap.
++// Paste inside #ifdef WITH_BLUESTORE near the end of store_test.cc.
++TEST_P(StoreTest, RenameAcrossHashKeepsOmap) {
++  coll_t cid(spg_t(pg_t(0, 781), shard_id_t::NO_SHARD));
++  ghobject_t src(hobject_t("rename_src", "", CEPH_NOSNAP, 0x11111111, 781, ""));
++  ghobject_t dst(hobject_t("rename_dst", "", CEPH_NOSNAP, 0x22222222, 781, ""));
++  auto ch = store->create_new_collection(cid);
++  int r;
++  bufferlist hdr;
++  hdr.append("hdr");
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);   // bits 0: both hashes belong here
++    t.touch(cid, src);
++    map<string, bufferlist> m;
++    m["k1"].append("v1");
++    t.omap_setkeys(cid, src, m);
++    t.omap_setheader(cid, src, hdr);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    ObjectStore::Transaction t;
++    t.collection_move_rename(cid, src, cid, dst);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  ASSERT_FALSE(store->exists(ch, src));
++  ASSERT_TRUE(store->exists(ch, dst));
++  {
++    bufferlist h;
++    map<string, bufferlist> out;
++    r = store->omap_get(ch, dst, &h, &out);
++    ASSERT_EQ(r, 0);
++    EXPECT_EQ(1u, out.count("k1")) << "omap lost by rename across hash";
++    EXPECT_TRUE(bl_eq(hdr, h)) << "omap header lost by rename across hash";
++  }
++  {
++    ObjectStore::Transaction t;
++    t.remove(cid, dst);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  if (string(GetParam()) == "bluestore") {
++    // removing dst clears the *new-hash* range only; old keys become stray
++    ch.reset();
++    EXPECT_EQ(store->umount(), 0);
++    EXPECT_EQ(store->fsck(false), 0) << "stray per-pg omap after rename+remove";
++    EXPECT_EQ(store->mount(), 0);
++    ch = store->open_collection(cid);
++  }
++  {
++    ObjectStore::Transaction t;
++    t.remove_collection(cid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++}
++
++// ===== candidate: omap-rmrange-same-txn
++// Candidate: omap range-delete ops (rmkeyrange / omap_clear / remove / clone)
++// do not see omap keys written earlier in the SAME transaction.
++// Paste inside #ifdef WITH_BLUESTORE near the end of store_test.cc
++// (tests are generic; they run for every StoreTest param).
++
++// A client op vector [omap_set(b), omap_rm_range(a,c)] reaches the store as
++// one Transaction: omap_setkeys + omap_rmkeyrange (PGTransaction keeps order).
++TEST_P(StoreTest, OmapRmKeyRangeSeesSameTxnKeys) {
++  coll_t cid(spg_t(pg_t(0, 777), shard_id_t::NO_SHARD));
++  ghobject_t hoid(hobject_t("omap_rmrange_same_txn", "", CEPH_NOSNAP, 0, 777, ""));
++  auto ch = store->create_new_collection(cid);
++  int r;
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    t.touch(cid, hoid);
++    map<string, bufferlist> m;
++    m["a"].append("committed");
++    m["d"].append("outside");
++    t.omap_setkeys(cid, hoid, m);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    ObjectStore::Transaction t;
++    map<string, bufferlist> m;
++    m["b"].append("same-txn");
++    t.omap_setkeys(cid, hoid, m);
++    t.omap_rmkeyrange(cid, hoid, "a", "c");   // must remove a and b
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    bufferlist h;
++    map<string, bufferlist> out;
++    r = store->omap_get(ch, hoid, &h, &out);
++    ASSERT_EQ(r, 0);
++    EXPECT_EQ(0u, out.count("a"));
++    EXPECT_EQ(0u, out.count("b")) << "key set earlier in the same txn survived rmkeyrange";
++    EXPECT_EQ(1u, out.count("d"));
++    EXPECT_EQ(1u, out.size());
++  }
++  {
++    ObjectStore::Transaction t;
++    t.remove(cid, hoid);
++    t.remove_collection(cid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++}
++
++// setkeys + omap_clear in one txn: BlueStore clears the FLAG_OMAP but leaves
++// the keys/header in the DB (same nid); the next omap write resurrects them.
++TEST_P(StoreTest, OmapClearSeesSameTxnKeys) {
++  coll_t cid(spg_t(pg_t(0, 778), shard_id_t::NO_SHARD));
++  ghobject_t hoid(hobject_t("omap_clear_same_txn", "", CEPH_NOSNAP, 0, 778, ""));
++  auto ch = store->create_new_collection(cid);
++  int r;
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    t.touch(cid, hoid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    ObjectStore::Transaction t;
++    map<string, bufferlist> m;
++    m["stale"].append("should-be-cleared");
++    bufferlist hdr;
++    hdr.append("stale-header");
++    t.omap_setheader(cid, hoid, hdr);
++    t.omap_setkeys(cid, hoid, m);
++    t.omap_clear(cid, hoid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    bufferlist h;
++    map<string, bufferlist> out;
++    r = store->omap_get(ch, hoid, &h, &out);
++    ASSERT_EQ(r, 0);
++    EXPECT_EQ(0u, out.size());
++    EXPECT_EQ(0u, h.length());
++  }
++  {
++    ObjectStore::Transaction t;
++    map<string, bufferlist> m;
++    m["fresh"].append("v");
++    t.omap_setkeys(cid, hoid, m);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    bufferlist h;
++    map<string, bufferlist> out;
++    r = store->omap_get(ch, hoid, &h, &out);
++    ASSERT_EQ(r, 0);
++    EXPECT_EQ(0u, out.count("stale")) << "cleared omap key resurrected";
++    EXPECT_EQ(0u, h.length()) << "cleared omap header resurrected";
++    EXPECT_EQ(1u, out.size());
++  }
++  {
++    ObjectStore::Transaction t;
++    t.remove(cid, hoid);
++    t.remove_collection(cid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++}
++
++// clone after setkeys in the same txn: BlueStore's _clone copies omap by
++// iterating the committed DB, so keys set on the source earlier in the same
++// txn are not copied, and keys set on the destination earlier in the same
++// txn are not cleared.
++TEST_P(StoreTest, OmapCloneSeesSameTxnKeys) {
++  coll_t cid(spg_t(pg_t(0, 779), shard_id_t::NO_SHARD));
++  ghobject_t src(hobject_t("omap_clone_src", "", CEPH_NOSNAP, 0x1234, 779, ""));
++  ghobject_t dst(hobject_t("omap_clone_src", "", 5, 0x1234, 779, ""));
++  auto ch = store->create_new_collection(cid);
++  int r;
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    t.touch(cid, src);
++    t.touch(cid, dst);
++    map<string, bufferlist> m;
++    m["old"].append("x");
++    t.omap_setkeys(cid, src, m);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    ObjectStore::Transaction t;
++    map<string, bufferlist> ms, md;
++    ms["new"].append("y");
++    md["junk"].append("z");
++    t.omap_setkeys(cid, src, ms);
++    t.omap_setkeys(cid, dst, md);
++    t.clone(cid, src, dst);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    bufferlist h;
++    map<string, bufferlist> out;
++    r = store->omap_get(ch, dst, &h, &out);
++    ASSERT_EQ(r, 0);
++    EXPECT_EQ(1u, out.count("old"));
++    EXPECT_EQ(1u, out.count("new")) << "source key set in same txn not cloned";
++    EXPECT_EQ(0u, out.count("junk")) << "dest key set in same txn not cleared by clone";
++    EXPECT_EQ(2u, out.size());
++  }
++  {
++    ObjectStore::Transaction t;
++    t.remove(cid, src);
++    t.remove(cid, dst);
++    t.remove_collection(cid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++}
++
++// setkeys + remove in one txn leaks the omap keys (fsck: stray per-pg omap).
++TEST_P(StoreTest, OmapRemoveSeesSameTxnKeys) {
++  if (string(GetParam()) != "bluestore")
++    return;
++  coll_t cid(spg_t(pg_t(0, 780), shard_id_t::NO_SHARD));
++  ghobject_t hoid(hobject_t("omap_remove_same_txn", "", CEPH_NOSNAP, 0, 780, ""));
++  auto ch = store->create_new_collection(cid);
++  int r;
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    t.touch(cid, hoid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  {
++    ObjectStore::Transaction t;
++    map<string, bufferlist> m;
++    m["k"].append("v");
++    t.omap_setkeys(cid, hoid, m);
++    t.remove(cid, hoid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++  ch.reset();
++  EXPECT_EQ(store->umount(), 0);
++  EXPECT_EQ(store->fsck(false), 0) << "stray omap left behind by remove";
++  EXPECT_EQ(store->mount(), 0);
++  ch = store->open_collection(cid);
++  {
++    ObjectStore::Transaction t;
++    t.remove_collection(cid);
++    r = queue_transaction(store, ch, std::move(t));
++    ASSERT_EQ(r, 0);
++  }
++}
++
++
++
++
++// ===== candidate: ncb-recovery-beyond-label-size
++// ===== candidate: ncb-recovery-beyond-label-size
++// Add to src/test/objectstore/store_test.cc inside #ifdef WITH_BLUESTORE,
++// next to MultiLabelTest.OnlineExpandReservesNewLabel.
++//
++// NCB allocation recovery (read_allocation_from_drive_on_startup) sizes its
++// bitmap by the PHYSICAL device size.  A grown-but-not-yet-expanded device
++// thus gets space beyond bdev_label.size handed to the allocator; a later
++// bluefs-bdev-expand then init_add_free()s that range a second time.
++TEST_P(MultiLabelTest, NcbRecoveryHonorsLabelSize) {
++  static constexpr uint64_t _1M = 1024 * 1024;
++  static constexpr uint64_t _1G = 1024 * _1M;
++  const uint64_t old_size = 900 * _1M;
++  SetVal(g_conf(), "bluestore_block_size", stringify(old_size).c_str());
++  SetVal(g_conf(), "bluestore_debug_enforce_settings", "ssd");
++  SetVal(g_conf(), "bluestore_allocation_from_file", "true");
++  SetVal(g_conf(), "bluestore_debug_inject_allocation_from_file_failure", "0");
++  g_conf().apply_changes(nullptr);
++  DeferredSetup();
++  BlueStore* bstore = dynamic_cast<BlueStore*>(store.get());
++  ASSERT_NE(nullptr, bstore);
++  ASSERT_TRUE(bstore->has_null_manager());
++  string block = get_data_dir() + "/block";
++  umount();
++
++  // backing device grows, admin has not run bluefs-bdev-expand yet
++  ASSERT_EQ(0, ::truncate(block.c_str(), 2 * _1G));
++
++  // restart after an unclean shutdown -> allocation map recovery from onodes
++  SetVal(g_conf(), "bluestore_debug_inject_allocation_from_file_failure", "1");
++  g_conf().apply_changes(nullptr);
++  ASSERT_EQ(0, mount());
++  SetVal(g_conf(), "bluestore_debug_inject_allocation_from_file_failure", "0");
++  g_conf().apply_changes(nullptr);
++
++  store_statfs_t st;
++  ASSERT_EQ(0, store->statfs(&st));
++  cout << "available after recovery: 0x" << std::hex << st.available
++       << " label size 0x" << old_size << std::dec << std::endl;
++  ASSERT_LE(st.available, old_size)
++    << "recovery made space beyond bdev_label.size allocatable";
++  umount();   // stores the allocation file
++
++  // now expand offline (ceph-bluestore-tool bluefs-bdev-expand)
++  {
++    stringstream ss;
++    ASSERT_EQ(0, bstore->expand_devices(ss));   // buggy: AVL double-add abort
++    cout << ss.str();
++  }
++  ASSERT_EQ(0, mount());
++  ASSERT_EQ(0, store->statfs(&st));
++  EXPECT_GT(st.available, old_size);
++  EXPECT_LE(st.available, 2 * _1G);
++  umount();
++  EXPECT_EQ(0, store->fsck(false));
++  ASSERT_EQ(0, mount());
++}
++
++
++
++
++// ===== candidate: freelist-blocks-per-key-unvalidated
++// ===== candidate: freelist-blocks-per-key-unvalidated
++// Add to src/test/objectstore/store_test.cc
++//
++// bluestore_freelist_blocks_per_key is persisted at mkfs with no validation.
++// A multiple-of-8 but non power-of-2 value (96) makes
++// BitmapFreelistManager::key_mask = ~(bytes_per_key - 1) a non-contiguous
++// mask: keys are not bytes_per_key apart, so a multi-key _xor() trips
++// ceph_assert(first_key == last_key) and enumerate_next() reports allocated
++// blocks as free.  Bitmap FM is forced with bluestore_allocation_from_file=false.
++// Expected (fixed): mkfs rejects the value, or everything below passes.
++// Buggy: abort in BitmapFreelistManager::_xor, or fsck errors.
++TEST_P(StoreTestSpecificAUSize, FreelistBlocksPerKeyNonPow2) {
++  if (string(GetParam()) != "bluestore")
++    GTEST_SKIP();
++  SetVal(g_conf(), "bluestore_allocation_from_file", "false");
++  SetVal(g_conf(), "bluestore_freelist_blocks_per_key", "96");
++  g_conf().apply_changes(nullptr);
++  StartDeferred(4096);
++
++  coll_t cid;
++  auto ch = store->create_new_collection(cid);
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  const unsigned N = 16;
++  bufferlist big, small;
++  big.append(std::string(1 << 20, 'B'));      // 1 MiB -> spans many 384K "keys"
++  small.append(std::string(4096, 's'));
++  for (unsigned i = 0; i < N; ++i) {
++    ObjectStore::Transaction t;
++    ghobject_t o(hobject_t(sobject_t("FLBPK_" + stringify(i), CEPH_NOSNAP)));
++    t.write(cid, o, 0, (i & 1) ? small.length() : big.length(),
++            (i & 1) ? small : big);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  // free some of it again so released ranges cross key boundaries as well
++  for (unsigned i = 0; i < N; i += 4) {
++    ObjectStore::Transaction t;
++    ghobject_t o(hobject_t(sobject_t("FLBPK_" + stringify(i), CEPH_NOSNAP)));
++    t.remove(cid, o);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  ch.reset();
++  ASSERT_EQ(0, store->umount());
++  ASSERT_EQ(0, store->fsck(false)) << "bitmap freelist inconsistent";
++  ASSERT_EQ(0, store->mount());
++  ch = store->open_collection(cid);
++  // allocate again after remount: allocator was loaded from the freelist;
++  // phantom-free blocks would be handed out here and overwrite live data.
++  for (unsigned i = 0; i < N; i += 4) {
++    ObjectStore::Transaction t;
++    ghobject_t o(hobject_t(sobject_t("FLBPK_new" + stringify(i), CEPH_NOSNAP)));
++    t.write(cid, o, 0, big.length(), big);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  for (unsigned i = 0; i < N; ++i) {
++    if (i % 4 == 0) continue;
++    ghobject_t o(hobject_t(sobject_t("FLBPK_" + stringify(i), CEPH_NOSNAP)));
++    bufferlist got;
++    const bufferlist& exp = (i & 1) ? small : big;
++    ASSERT_EQ((int)exp.length(), store->read(ch, o, 0, exp.length(), got));
++    ASSERT_TRUE(got.contents_equal(exp)) << "object " << i << " overwritten";
++  }
++  ch.reset();
++  ASSERT_EQ(0, store->umount());
++  ASSERT_EQ(0, store->fsck(false));
++  ASSERT_EQ(0, store->mount());
++}
++
++
++// ===== candidate: dead-bluestore-options
++// ===== candidate: dead-bluestore-options
++// Add to src/test/objectstore/store_test.cc (needs `#include <regex>` at top)
++//
++// bluestore_max_alloc_size ("Maximum size of a single allocation") is read
++// into BlueStore::max_alloc_size but that member is never used by any
++// allocate() call, so the cap is silently ignored.
++TEST_P(StoreTestSpecificAUSize, MaxAllocSizeIgnored) {
++  if (string(GetParam()) != "bluestore")
++    GTEST_SKIP();
++  const uint64_t cap = 0x10000;
++  SetVal(g_conf(), "bluestore_max_alloc_size", stringify(cap).c_str());
++  SetVal(g_conf(), "bluestore_max_blob_size", "1048576");
++  SetVal(g_conf(), "bluestore_compression_mode", "none");
++  SetVal(g_conf(), "bluestore_prefer_deferred_size", "0");
++  g_conf().apply_changes(nullptr);
++  StartDeferred(4096);
++
++  coll_t cid;
++  ghobject_t hoid(hobject_t(sobject_t("MaxAllocObj", CEPH_NOSNAP)));
++  auto ch = store->create_new_collection(cid);
++  {
++    ObjectStore::Transaction t;
++    t.create_collection(cid, 0);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  bufferlist bl;
++  bl.append(std::string(1 << 20, 'm'));
++  {
++    ObjectStore::Transaction t;
++    t.write(cid, hoid, 0, bl.length(), bl);
++    ASSERT_EQ(0, queue_transaction(store, ch, std::move(t)));
++  }
++  JSONFormatter f(false);
++  ASSERT_EQ(0, store->dump_onode(ch, hoid, "onode", &f));
++  std::ostringstream os;
++  f.flush(os);
++  std::string js = os.str();
++  // physical extents are dumped as {"offset":N,"length":M}
++  std::regex re("\\{\"offset\":([0-9]+),\"length\":([0-9]+)\\}");
++  uint64_t max_seen = 0, n = 0;
++  for (auto it = std::sregex_iterator(js.begin(), js.end(), re);
++       it != std::sregex_iterator(); ++it) {
++    uint64_t len = std::stoull((*it)[2].str());
++    max_seen = std::max(max_seen, len);
++    ++n;
++  }
++  cout << "pextents " << n << " largest 0x" << std::hex << max_seen << std::dec
++       << std::endl;
++  ASSERT_GT(n, 0u) << js;
++  ASSERT_LE(max_seen, cap)
++    << "bluestore_max_alloc_size=64K ignored: physical extent of 0x"
++    << std::hex << max_seen;
++}
++
++
+ #endif // WITH_BLUESTORE
+ 
+ TEST_P(StoreTestSpecificAUSize, BluestoreEnforceHWSettingsHdd) {
+diff --git a/src/test/objectstore/test_bluefs.cc b/src/test/objectstore/test_bluefs.cc
+index 2be0b666ca8..d7f52fe05fe 100644
+--- a/src/test/objectstore/test_bluefs.cc
++++ b/src/test/objectstore/test_bluefs.cc
+@@ -3128,6 +3128,208 @@ TEST(bluefs_locked_extents_t, basics) {
+   }
+ }
+ 
++
++// ===== candidate: envmode-ino-reuse-stale-envelopes
++// Append to src/test/objectstore/test_bluefs.cc (after the BlueFS_wal fixture).
++//
++// A WAL that gets a re-issued ino (after compaction + remount) shares the
++// envelope stamp with the deleted WAL that used that ino before. After an
++// unclean close, replay indexing accepts the old file's envelopes that still
++// sit in the (re-allocated) extent as content of the new file.
++TEST_F(BlueFS_wal, bughunt_envmode_ino_reuse_stale_envelopes)
++{
++  SKIP_IF_NO_LIBAIO();
++  ConfSaver conf(g_ceph_context->_conf);
++  conf.SetVal("bluefs_min_flush_size", "65536");
++  conf.SetVal("bluefs_wal_envelope_mode", "true");
++  conf.ApplyChanges();
++
++  Create(1048576 * 256, 1048576 * 128, 1048576 * 64);
++  ASSERT_EQ(0, fs.mount());
++
++  // "db" -> BDEV_DB; BlueFS log lives on BDEV_WAL, so only our files use DB.
++  const std::string dir = "db";
++  const std::string old_name = "000001.log";
++  const std::string new_name = "000002.log";
++  ASSERT_EQ(0, fs.mkdir(dir));
++
++  // head(8) + payload + tail(8) == 4096: every envelope is exactly one block,
++  // so flush ends are block aligned and no zero padding hides old envelopes.
++  constexpr size_t payload = 4096 - 16;
++  constexpr int old_envelopes = 8;
++  constexpr int new_envelopes = 2;
++
++  // 1. old WAL, cleanly closed
++  BlueFS::FileWriter *w = nullptr;
++  ASSERT_EQ(0, fs.open_for_write(dir, old_name, &w, false));
++  const uint64_t old_ino = w->file->fnode.ino;
++  for (int i = 0; i < old_envelopes; i++) {
++    std::string d(payload, 'A');
++    fs.append_try_flush(w, d.data(), d.size());
++    fs.fsync(w);
++  }
++  ASSERT_FALSE(w->file->fnode.extents.empty());
++  const bluefs_extent_t old_ext = w->file->fnode.extents[0];
++  fs.close_writer(w);
++
++  // 2. delete it, compact so its ino disappears from the log, remount
++  ASSERT_EQ(0, fs.unlink(dir, old_name));
++  fs.sync_metadata(true);
++  fs.compact_log();
++  fs.umount();
++  ASSERT_EQ(0, fs.mount());
++
++  // 3. new WAL: same ino re-issued, write fewer envelopes, then "crash"
++  ASSERT_EQ(0, fs.open_for_write(dir, new_name, &w, false));
++  const uint64_t new_ino = w->file->fnode.ino;
++  for (int i = 0; i < new_envelopes; i++) {
++    std::string d(payload, 'B');
++    fs.append_try_flush(w, d.data(), d.size());
++    fs.fsync(w);
++  }
++  ASSERT_FALSE(w->file->fnode.extents.empty());
++  const bluefs_extent_t new_ext = w->file->fnode.extents[0];
++  delete w; // no close_writer(): simulate crash, file stays ENVELOPE (not FIN)
++  std::cout << "old ino " << old_ino << " ext " << old_ext
++            << " / new ino " << new_ino << " ext " << new_ext << std::endl;
++  if (new_ino != old_ino ||
++      new_ext.bdev != old_ext.bdev || new_ext.offset != old_ext.offset) {
++    fs.umount();
++    GTEST_SKIP() << "precondition not met (ino/extent not reused), inconclusive";
++  }
++  fs.umount();
++
++  // 4. replay + read back
++  ASSERT_EQ(0, fs.mount());
++  uint64_t size = 0;
++  ASSERT_EQ(0, fs.stat(dir, new_name, &size, nullptr));
++  BlueFS::FileReader *r = nullptr;
++  ASSERT_EQ(0, fs.open_for_read(dir, new_name, &r));
++  bufferlist bl;
++  fs.read(r, 0, payload * (old_envelopes + 4), &bl, nullptr);
++  delete r;
++  fs.umount();
++
++  const std::string expected(payload * new_envelopes, 'B');
++  std::string got = bl.to_str();
++  size_t foreign = std::count(got.begin(), got.end(), 'A');
++  std::cout << "stat size " << size << " read " << got.size()
++            << " foreign('A') bytes " << foreign << std::endl;
++  EXPECT_EQ(expected.size(), size)
++    << "stat() of new WAL includes envelopes of the deleted WAL";
++  EXPECT_EQ(0u, foreign)
++    << "new WAL returns data of a deleted WAL (same ino => same stamp)";
++  EXPECT_TRUE(got == expected);
++}
++
++
++// ===== candidate: revert-wal-plain-only-dbwal-dir
++// Append to src/test/objectstore/test_bluefs.cc (after the BlueFS_wal fixture).
++//
++// revert_wal_to_plain() only looks at "db.wal"; envelope WALs in "db"
++// (legacy OSD layout without db.wal) are left in v2 format.
++
++// Variant A: no "db.wal" directory -> silent no-op, file stays ENVELOPE.
++TEST_F(BlueFS_wal, bughunt_revert_wal_to_plain_skips_db_dir)
++{
++  SKIP_IF_NO_LIBAIO();
++  ConfSaver conf(g_ceph_context->_conf);
++  conf.SetVal("bluefs_min_flush_size", "65536");
++  conf.SetVal("bluefs_wal_envelope_mode", "true");
++  conf.ApplyChanges();
++
++  Create(1048576 * 256, 1048576 * 128, 1048576 * 64);
++  ASSERT_EQ(0, fs.mount());
++  bufferlist content;
++  many_small_writes("db", "000001.log", content, 20000);
++  fs.umount();
++
++  ASSERT_EQ(0, fs.mount());
++  fs.revert_wal_to_plain();
++
++  BlueFS::FileReader *reader = nullptr;
++  ASSERT_EQ(0, fs.open_for_read("db", "000001.log", &reader));
++  bool still_envelope = reader->file->envelope_mode();
++  delete reader;
++  bufferlist read_content;
++  many_small_reads("db", "000001.log", read_content, 20000);
++  fs.umount();
++  EXPECT_FALSE(still_envelope)
++    << "revert_wal_to_plain left an envelope-mode WAL in 'db' untouched";
++  EXPECT_EQ(content, read_content);
++}
++
++// Variant B: "db.wal" exists too -> ceph_assert(!log.uses_envelope_mode)
++// aborts inside revert_wal_to_plain (test binary dies == FAIL).
++TEST_F(BlueFS_wal, bughunt_revert_wal_to_plain_asserts_with_db_wal)
++{
++  SKIP_IF_NO_LIBAIO();
++  ConfSaver conf(g_ceph_context->_conf);
++  conf.SetVal("bluefs_min_flush_size", "65536");
++  conf.SetVal("bluefs_wal_envelope_mode", "true");
++  conf.ApplyChanges();
++
++  Create(1048576 * 256, 1048576 * 128, 1048576 * 64);
++  ASSERT_EQ(0, fs.mount());
++  ASSERT_EQ(0, fs.mkdir("db.wal"));
++  bufferlist content_wal, content_db;
++  many_small_writes("db.wal", "000002.log", content_wal, 20000);
++  many_small_writes("db", "000001.log", content_db, 20000);
++  fs.umount();
++
++  ASSERT_EQ(0, fs.mount());
++  fs.revert_wal_to_plain(); // buggy: aborts here
++
++  BlueFS::FileReader *reader = nullptr;
++  ASSERT_EQ(0, fs.open_for_read("db", "000001.log", &reader));
++  EXPECT_FALSE(reader->file->envelope_mode());
++  delete reader;
++  fs.umount();
++}
++
++
++// ===== candidate: bluefs-invalidate-cache-range
++// Append to src/test/objectstore/test_bluefs.cc
++//
++// BlueFS::invalidate_cache() forwards a block-aligned offset with an
++// unaligned length to KernelDevice::invalidate_cache(), which asserts
++// len % block_size == 0. Buggy build: the test binary aborts (FAIL).
++TEST(BlueFS, bughunt_invalidate_cache_unaligned_length)
++{
++  SKIP_IF_NO_LIBAIO();
++  uint64_t size = 1048576 * 128;
++  TempBdev bdev{size};
++  ConfSaver conf(g_ceph_context->_conf);
++  conf.SetVal("bluefs_alloc_size", "65536");   // several extents per file
++  conf.ApplyChanges();
++
++  BlueFS fs(g_ceph_context);
++  ASSERT_EQ(0, fs.add_block_device(BlueFS::BDEV_DB, bdev.path, false));
++  uuid_d fsid;
++  ASSERT_EQ(0, fs.mkfs(fsid, { BlueFS::BDEV_DB, false, false }));
++  ASSERT_EQ(0, fs.mount());
++  ASSERT_EQ(0, fs.mkdir("dir"));
++
++  BlueFS::FileWriter *w = nullptr;
++  ASSERT_EQ(0, fs.open_for_write("dir", "file.sst", &w, false));
++  std::string data(256 * 1024, 'x');
++  fs.append_try_flush(w, data.data(), data.size());
++  fs.fsync(w);
++  fs.close_writer(w);
++
++  BlueFS::FileReader *r = nullptr;
++  ASSERT_EQ(0, fs.open_for_read("dir", "file.sst", &r, true));
++  std::cout << "file " << r->file->fnode << std::endl;
++  fs.invalidate_cache(r->file, 0, 4096);          // fine
++  fs.invalidate_cache(r->file, 4096 + 7, 100);    // fine (offset unaligned -> rounded)
++  fs.invalidate_cache(r->file, 0, 100);           // buggy: ceph_assert abort
++  fs.invalidate_cache(r->file, 0, 200 * 1024);    // spans extents
++  delete r;
++  fs.umount();
++  SUCCEED();
++}
++
++
+ int main(int argc, char **argv) {
+   auto args = argv_to_vec(argc, argv);
+   map<string,string> defaults = {

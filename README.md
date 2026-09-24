@@ -108,3 +108,9 @@ flush lands in `kv_queued`), microseconds for deferred.
 3. `oplat.bt` on that OSD → confirm the op was slow server-side (client
    latency minus this span = network + messenger).
 4. For writes, `wlat.bt` on the OSD → which BlueStore stage to blame.
+
+## trackers/ — confirmed bug records
+
+`trackers/` holds bug reports ready for tracker.ceph.com, each with a
+reproducer that was run and confirmed. See `trackers/README.md`;
+`trackers/bluestore-2026-09/` covers 25 BlueStore/BlueFS bugs.
