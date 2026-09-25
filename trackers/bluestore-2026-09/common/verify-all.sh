@@ -87,5 +87,7 @@ fi
 sel 23 && sh_ 23 repro.sh 600 23-bluefs-alloc-size-non-pow2-abort/repro.sh -- 'non-pow2 BlueFS alloc unit aborts'
 sel 24 && run 24 MaxAllocSizeIgnored 600 $OS --gtest_filter='*/StoreTestSpecificAUSize.MaxAllocSizeIgnored/1' -- 'bluestore_max_alloc_size=64K ignored'
 
+sel 25 && sh_ 25 live-osd-repro.sh 900 25-rm-range-keys-unbounded-without-iterator-bounds/live-osd-repro.sh -- 'victim keys after \(total\): 0 '
+
 echo "== summary: $SUMMARY"
 cat "$SUMMARY"

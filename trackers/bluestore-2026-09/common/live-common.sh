@@ -1,5 +1,6 @@
 # helpers for live-OSD reproducers (vstart, 1 OSD, pool "p" size 1)
 BUILD=${BUILD:-/root/git/ceph/ceph/build}
+BIN=$BUILD/bin
 export VSTART_DEST=${VSTART_DEST:-/root/bh/vs}
 export CEPH_CONF=$VSTART_DEST/ceph.conf
 export PYTHONPATH=$BUILD/lib/cython_modules/lib.3

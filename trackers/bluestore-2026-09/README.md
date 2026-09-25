@@ -1,6 +1,6 @@
 # BlueStore bug hunt — 2026-09
 
-18 bugs in BlueStore / BlueFS / ceph-bluestore-tool that occur in real use, found by
+19 bugs in BlueStore / BlueFS / ceph-bluestore-tool that occur in real use, found by
 code review and reproduced on a clean ceph `origin/main` @ 8e6a13e7a9a (2026-09-24).
 Every item was searched on tracker.ceph.com (subject and full text) and on GitHub
 ceph/ceph PRs and issues in all states; none is already reported. Each report was
@@ -39,6 +39,8 @@ Running and filing: [common/HOWTO.md](common/HOWTO.md).
 | 22 | [freelist_blocks_per_key not validated](22-freelist-blocks-per-key-unvalidated/) | minor | dev option | real tools (+ store-level for 96) |
 | 23 | [non-power-of-2 BlueFS alloc size aborts](23-bluefs-alloc-size-non-pow2-abort/) | minor | option value | real tool |
 | 24 | [bluestore_max_alloc_size and 9 other options have no consumer](24-dead-options-max-alloc-size-ignored/) | minor | any | store-level + static check |
+
+| 25 | [rm_range_keys ignores the range end when iterator bounds are disabled: other objects' omap deleted](25-rm-range-keys-unbounded-without-iterator-bounds/) | major | osd_rocksdb_iterator_bounds_enabled=false (dev) | live OSD: 20 objects' omap wiped |
 
 `bluestore_write_v2` is off by default; it is randomized only with
 `bluestore_write_v2_random=true` (default off) and forced on in some QA objectstore suites.
