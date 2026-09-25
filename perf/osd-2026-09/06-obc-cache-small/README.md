@@ -4,9 +4,9 @@
 |---|---|
 | Area | PG (`PrimaryLogPG::get_object_context`) |
 | Change | config default + small code change |
-| Expected gain | CPU per op on RBD-sized working sets; estimated 3–8 µs per miss (not measured) |
+| Expected gain | CPU per op on RBD-sized working sets; measured about 7.6 µs of OSD CPU per miss avoided (estimate was 3–8 µs) |
 | Risk | low (memory is bounded) |
-| Status | code analysis, not measured |
+| Status | **confirmed** for the cache size (measured 2026-09-25); the single attr fetch is not measured |
 
 ## Summary
 
@@ -54,6 +54,35 @@ A miss, all under the PG lock:
    only when the snapset context is not cached yet, and it copies every xattr
    of the object, which costs more for objects with many xattrs (RGW).
 3. `obc->obs.oi = std::move(oi)` at `PrimaryLogPG.cc:12203`.
+
+## Measured
+
+Setup: v21.3.0 RelWithDebInfo with `common/measurement-switches.patch`,
+vstart, 3 BlueStore OSDs on brd ramdisks (the device is not the bottleneck,
+so per-op cost shows up as OSD CPU), 64-CPU host, 3 interleaved rounds, 30 s
+per workload (`common/osdperf-leg.sh`).
+Values are the mean of 3 runs, with [min..max]. Raw output:
+`results/2026-09-25-ab1.txt`.
+
+Workload `orr`: `rados bench rand -t 64` over 16000 objects in a 32-PG pool
+(500 objects per PG). The leg changes only
+`osd_pg_object_context_cache_count`.
+
+| | 64 (default) | 512 | change |
+|---|---|---|---|
+| obc hit rate (`object_ctx_cache_hit / total`) | 0.128 | 0.992 | 64/500 predicted 0.128 |
+| OSD CPU per read | 61.7 µs [60.5..62.6] | 55.2 µs [53.3..56.5] | −10.6% |
+| OSD read latency (`op_r_latency`) | 34.4 µs [33.8..35.2] | 28.1 µs [26.6..29.1] | −18% |
+| client IOPS | 62.6k [59.6k..65.0k] | 64.8k [63.8k..65.8k] | +3.5% (ranges overlap) |
+
+- Per miss avoided: 6.56 µs less CPU per read ÷ 0.864 fewer misses per read
+  ≈ 7.6 µs of OSD CPU (read latency gives ≈ 7.3 µs).
+- With a very large object set (`rr4k`, about 880,000 objects, ~27,000 per
+  PG) both sizes miss: predicted hit rates 0.0023 and 0.019, measured 0.002
+  and 0.018. There is no gain there, as expected.
+- Client IOPS rose less than OSD CPU fell. OSD CPU is not what limits IOPS in
+  this setup (the OSD op takes 34 µs of the 1.02 ms client latency); what
+  does limit it was not measured.
 
 ## How to observe
 

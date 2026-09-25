@@ -6,29 +6,44 @@ were the traces in the blog post
 [Ceph OSD Analysis](https://ming1.github.io/storage/ceph-osd-analysis): one
 16 KiB read (§4.1) and one 16 KiB write on three OSDs (§4.2).
 
-**Status: code analysis only.** No candidate has been patched or measured
-yet. Every cost figure is an estimate from the code. Each record says how to
-measure it; `common/osdperf-ab.sh` runs the A/B workloads. All `file:line`
-references are to v21.3.0 under `src/`.
+**Status:** found by code analysis; three candidates measured so far
+(2026-09-25, see [Measured so far](#measured-so-far)). The other cost figures
+are estimates from the code. All `file:line` references are to v21.3.0 under
+`src/`.
+
+## Measured so far
+
+On 3 BlueStore OSDs on brd ramdisks, where the device is not the bottleneck
+and per-op cost shows up as OSD CPU (3 interleaved rounds;
+`results/2026-09-25-ab1.txt`). Noise, judged from switch 03 on the
+replicated workloads (which it cannot affect): OSD CPU per op moved −1.2% to
+−2.6% at queue depth 64 and −9% at queue depth 1; the OSD latency counters
+moved 6–10%. Only changes well beyond that count.
+
+| # | Candidate | Result |
+|---|-----------|--------|
+| 03 | EC dummy roll-forward (upper bound: dummy off) | **confirmed**: BlueStore transactions per EC write 5.18 → 3.00, OSD CPU per write −25%, IOPS +8.9% |
+| 06 | obc cache 64 → 512 (500 objects per PG) | **confirmed**: hit rate 0.128 → 0.992, OSD CPU per read −10.6%, OSD read latency −18% |
+| 02 | cheap stats publish | mechanism confirmed (full publishes 594,936 → 320), but CPU per op changed by about 1–1.5%, within noise: **minor** |
 
 ## Candidates
 
-Ranked by expected gain per line of change.
+Ranked by expected gain per line of change, updated with the measurements.
 
 | # | Candidate | Area | Change | Expected gain | Workload |
 |---|-----------|------|--------|---------------|----------|
+| 03 | [EC dummy roll-forward op after most writes](03-ec-dummy-roll-forward/) | EC | small | **measured** upper bound: −42% BlueStore transactions, −25% OSD CPU per EC write | rbd 4k randwrite on EC |
+| 06 | [Object-context cache: 64 per PG, two getattrs per miss](06-obc-cache-small/) | PG | config + small | **measured**: −10.6% OSD CPU per read at 500 objects per PG | 4k randread, warm |
 | 01 | [Commit callbacks run after the owner thread's op](01-oncommits-run-after-op/) | op queue | 3 lines | write latency under mixed load | rbd 70/30 randrw, cold cache |
-| 02 | [PG stats published on every read and write](02-publish-stats-every-op/) | PG | small | CPU on every op | 4k randread / randwrite |
-| 03 | [EC dummy roll-forward op after most writes](03-ec-dummy-roll-forward/) | EC | small | fewer EC sub-writes and KV commits | rbd 4k randwrite on EC |
 | 04 | [Deep scrub reads a whole chunk in one PG-lock hold](04-deep-scrub-no-yield/) | scrub | ~3 lines | client p99 during deep scrub | 4k writes + deep-scrub |
 | 05 | [One queued item wakes every thread of the shard](05-op-shard-wakes-all-threads/) | op queue | small | CPU, low-QD latency | QD1 4k write |
-| 06 | [Object-context cache: 64 per PG, two getattrs per miss](06-obc-cache-small/) | PG | config + small | CPU per op on RBD | 4k randread, warm |
 | 07 | [BlueStore submit (io_submit) under the PG lock](07-store-submit-under-pg-lock/) | BlueStore | medium | PG-lock time per write | 4k randwrite, few PGs |
 | 08 | [Replicated read holds the PG lock across the device](08-replicated-read-holds-pg-lock/) | read | large | hot-PG latency on cache miss | mixed r/w, cold cache |
 | 09 | [Background work reads under the PG lock](09-background-work-under-pg-lock/) | recovery, backfill | medium | client p99 during recovery | 4k writes + osd out |
 | 10 | [Replica reply handled as a full op](10-replica-reply-full-op/) | messenger, op queue | small / medium | CPU per write | 4k write -t 64 |
 | 11 | [Metadata per small write: dup keys, full info](11-per-write-metadata/) | PG log | small / format | KV ops per write | long 4k write |
 | 12 | [Small CPU costs per op](12-cpu-per-op-small-wins/) | write, read | trivial each | CPU per op | 4k -t 64 |
+| 02 | [PG stats published on every read and write](02-publish-stats-every-op/) | PG | small | **measured**: about 1 µs per op or less, within noise | 4k randread / randwrite |
 | 13 | [EC: primary's own shard read loops back](13-ec-local-read-loopback/) | EC | small+ | 1/k of EC ops | rbd 4k on EC |
 
 Small fixes found along the way (details in the records):
@@ -50,12 +65,35 @@ Small fixes found along the way (details in the records):
 
 ## How to measure
 
-`common/osdperf-ab.sh <build-dir> <outdir> [pool]` runs one A/B leg on a
-vstart cluster: QD1 4k write, QD32 4k write, and cold-cache random reads with
-concurrent 4k writes. For each workload it records `rados bench` IOPS and
-latency, per-OSD perf-counter deltas, voluntary context switches of the
-`tp_osd_tp` threads per op, and an `io_submit` histogram per OSD. Run it on
-the stock build, then on each patched build or config change.
+- `common/measurement-switches.patch` puts candidates 01, 02 and 03 behind
+  the environment variable `CEPH_PERF_PATCHES` (for example `01,03`), read
+  once per OSD process. One binary serves every leg; with the variable unset
+  the OSD behaves as stock. Measurement only: switch 03 is unsafe, and switch
+  02 is simpler than the proposed change (no `force` path).
+- `common/osdperf-leg.sh <build-dir> <outdir> <patches> [conf-line ...]` runs
+  one leg: vstart with 3 BlueStore OSDs on `/dev/ram0..2` (`modprobe brd
+  rd_nr=3 rd_size=8388608`), a replicated and an EC pool, then 4k write,
+  random read, EC write, QD1 write, small-set random read and mixed
+  workloads. For each it records IOPS, latency, OSD CPU per op (from
+  `/proc`, idle subtracted), `tp_osd_tp` context switches per op, BlueStore
+  transactions per op, the obc hit rate and OSD latency counters.
+- Run the legs interleaved in rounds, with the baseline leg named `none`,
+  then `common/osdperf-summary.py <ab-dir>` prints mean, change against
+  `none` and [min..max] per workload:
+
+  ```sh
+  for r in 1 2 3; do
+      osdperf-leg.sh $BUILD ab/r$r/none   none
+      osdperf-leg.sh $BUILD ab/r$r/p03    03
+      osdperf-leg.sh $BUILD ab/r$r/obc512 none "osd_pg_object_context_cache_count = 512"
+  done
+  osdperf-summary.py ab
+  ```
+
+  The first A/B run (`results/2026-09-25-ab1.txt`) predates the mixed
+  workload, so it has no `mixw` section.
+- `common/check02.sh <build-dir>` counts the full stats-publish calls with
+  switch 02 off and on (bpftrace).
 
 ## A note on the trace numbers
 

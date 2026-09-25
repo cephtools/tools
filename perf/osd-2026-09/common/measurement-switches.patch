@@ -1,0 +1,121 @@
+diff -ruN a/src/osd/ECCommon.cc b/src/osd/ECCommon.cc
+--- a/src/osd/ECCommon.cc	2026-09-24 19:25:18.884459424 -0500
++++ b/src/osd/ECCommon.cc	2026-09-24 19:25:18.987506897 -0500
+@@ -27,6 +27,7 @@
+ #include "ECMsgTypes.h"
+ #include "PGLog.h"
+ #include "osd_tracer.h"
++#include "perf_patch.h"
+ 
+ #define dout_context cct
+ #define dout_subsys ceph_subsys_osd
+@@ -1072,7 +1073,10 @@
+ 
+   op->cache_ops.clear();
+ 
+-  if (extent_cache.idle()) {
++  // perf/osd-2026-09 record 03: upper bound of the gain -- never send the
++  // dummy roll-forward op.  UNSAFE (rollback state is kept until the next
++  // write), measurement only.
++  if (extent_cache.idle() && !perf_patch(3)) {
+     if (op->version > get_parent()->get_log().get_can_rollback_to()) {
+       dout(20) << __func__ << " cache idle " << op->version << dendl;
+       // submit a dummy, transaction-empty op to kick the rollforward
+diff -ruN a/src/osd/OSD.cc b/src/osd/OSD.cc
+--- a/src/osd/OSD.cc	2026-09-24 19:25:18.860724804 -0500
++++ b/src/osd/OSD.cc	2026-09-24 19:25:18.985672514 -0500
+@@ -164,6 +164,7 @@
+ #endif
+ 
+ #include "osd_tracer.h"
++#include "perf_patch.h"
+ 
+ 
+ #define dout_context cct
+@@ -11251,6 +11252,12 @@
+     ++slot->num_running;
+ 
+     sdata->shard_lock.unlock();
++    // perf/osd-2026-09 record 01: run the commit callbacks we took from
++    // context_queue before we block on this PG and run the op.
++    if (perf_patch(1)) {
++      handle_oncommits(oncommits);
++      oncommits.clear();
++    }
+     osd->service.maybe_inject_dispatch_delay();
+     pg->lock();
+     osd->service.maybe_inject_dispatch_delay();
+diff -ruN a/src/osd/perf_patch.h b/src/osd/perf_patch.h
+--- a/src/osd/perf_patch.h	1969-12-31 18:00:00.000000000 -0600
++++ b/src/osd/perf_patch.h	2026-09-24 19:27:55.566379016 -0500
+@@ -0,0 +1,25 @@
++// SPDX-License-Identifier: LGPL-2.1-or-later
++// Measurement-only switches for the OSD performance study (perf/osd-2026-09).
++// CEPH_PERF_PATCHES is read once per process, e.g. CEPH_PERF_PATCHES=01,02
++// turns on candidates 01 and 02.  Not for production use.
++#pragma once
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++inline bool perf_patch(int n)
++{
++  static const unsigned mask = [] {
++    unsigned m = 0;
++    const char *s = std::getenv("CEPH_PERF_PATCHES");
++    for (int i = 1; s && i < 32; i++) {
++      char id[4];
++      std::snprintf(id, sizeof(id), "%02d", i);
++      if (std::strstr(s, id))
++	m |= 1u << i;
++    }
++    return m;
++  }();
++  return mask & (1u << n);
++}
+diff -ruN a/src/osd/PG.cc b/src/osd/PG.cc
+--- a/src/osd/PG.cc	2026-09-24 19:25:18.865620591 -0500
++++ b/src/osd/PG.cc	2026-09-24 19:45:23.964841827 -0500
+@@ -69,6 +69,8 @@
+ 
+ #include <sstream>
+ 
++#include "perf_patch.h"
++
+ #define dout_context cct
+ #define dout_subsys ceph_subsys_osd
+ #undef dout_prefix
+@@ -799,6 +801,21 @@
+   if (!is_primary())
+     return;
+ 
++  // perf/osd-2026-09 record 02: between full publishes (at most one per
++  // second, or on a state change) refresh only the object counters.
++  if (perf_patch(2)) {
++    auto now = ceph::coarse_mono_clock::now();
++    std::lock_guard l{pg_stats_publish_lock};
++    if (pg_stats_publish &&
++	pg_stats_publish->state == recovery_state.get_state() &&
++	now - last_full_publish < std::chrono::seconds(1)) {
++      pg_stats_publish->stats = recovery_state.get_info().stats.stats;
++      pg_stats_publish->stats.add(unstable_stats);
++      return;
++    }
++    last_full_publish = now;
++  }
++
+   ceph_assert(m_scrubber);
+   recovery_state.update_stats_wo_resched(
+     [scrubber = m_scrubber.get()](pg_history_t& hist,
+diff -ruN a/src/osd/PG.h b/src/osd/PG.h
+--- a/src/osd/PG.h	2026-09-24 19:25:18.876358703 -0500
++++ b/src/osd/PG.h	2026-09-24 19:25:18.986672500 -0500
+@@ -1109,6 +1109,7 @@
+   ceph::mutex pg_stats_publish_lock =
+     ceph::make_mutex("PG::pg_stats_publish_lock");
+   std::optional<pg_stat_t> pg_stats_publish;
++  ceph::coarse_mono_time last_full_publish;  // perf/osd-2026-09 record 02
+ 
+   friend class TestOpsSocketHook;
+   void publish_stats_to_osd() override;

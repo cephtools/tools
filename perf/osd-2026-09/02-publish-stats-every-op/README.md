@@ -4,9 +4,9 @@
 |---|---|
 | Area | PG stats (`PG::publish_stats_to_osd`) |
 | Change | small |
-| Expected gain | CPU on every op; estimated 1–3 µs per op (not measured) |
+| Expected gain | measured: about 1 µs per op or less, not resolvable from run-to-run noise |
 | Risk | low, if the counters stay exact (see below) |
-| Status | code analysis, not measured |
+| Status | **mechanism confirmed, gain not measurable** (2026-09-25) |
 
 ## Summary
 
@@ -39,6 +39,43 @@ every op takes the full path.
 Side effects the function must keep: it sets `PG_STATE_INCONSISTENT` and
 `PG_STATE_DEGRADED` from the stats, and refreshes `last_fresh` and
 `reported_epoch`.
+
+## Measured
+
+Setup: v21.3.0 RelWithDebInfo with `common/measurement-switches.patch`,
+vstart, 3 BlueStore OSDs on brd ramdisks (the device is not the bottleneck,
+so per-op cost shows up as OSD CPU), 64-CPU host, 3 interleaved rounds, 30 s
+per workload (`common/osdperf-leg.sh`).
+Values are the mean of 3 runs, with [min..max]. Raw output:
+`results/2026-09-25-ab1.txt`.
+
+The mechanism is confirmed. bpftrace counted the full path while 10 s of
+random reads ran (the probes count for about 22 s: 12 s idle, then the reads;
+`results/2026-09-25-check02.txt`, `common/check02.sh`):
+
+| | reads | `publish_stats_to_osd` | `prepare_stats_for_publish` (full path) |
+|---|---|---|---|
+| stock | 594,935 | 594,936 | 594,936 |
+| switch 02 | 544,086 | 544,087 | 320 |
+
+So stock runs one full publish per op, and switch 02 removes 99.94% of them
+(320 = 32 PGs × one full publish per second × 10 s, as designed). But OSD CPU
+per op hardly moved:
+
+| workload | stock | switch 02 | change |
+|---|---|---|---|
+| `rr4k` 4k random read | 84.5 µs [83.1..85.8] | 83.6 µs [83.0..84.6] | −1.1% (ranges overlap) |
+| `rw4k` 4k write, size 3 | 646 µs [639..657] | 653 µs [643..667] | +1.2% (ranges overlap) |
+
+The mean CPU saving on reads is about 1 µs per op, but three runs cannot
+separate it from noise (any saving up to about 3 µs fits the ranges). Read
+latency fell 5.1% with non-overlapping ranges, but switch 03, which cannot
+touch a replicated pool, moved the same metric by −6.3% (and CPU per op by
+−1.2% to −2.6%): noise in these runs is larger than the change. So the gain is small and not proven;
+the change is still correct, but it is a minor item, not a top candidate.
+
+The measured switch is simpler than the proposal above: it has no `force`
+path, so a state change is only noticed by the state compare.
 
 ## Who reads the result
 

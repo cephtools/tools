@@ -6,7 +6,7 @@
 | Change | small (a timer) |
 | Expected gain | at low per-PG queue depth, up to one extra round per client write removed: about 3 sub-write messages and replies, and 3–4 KV commits (the written shards, the primary's own included) (estimate) |
 | Risk | medium (rollback window) |
-| Status | code analysis, not measured |
+| Status | **confirmed** (upper bound measured, 2026-09-25); the timer version is not yet built |
 
 ## Summary
 
@@ -44,6 +44,34 @@ Checked in `ECCommon.cc` and `ECBackend.cc`:
 
 The dummy costs no client latency, because it is sent after the reply. It costs
 load: messages, KV commits and PG-lock rounds on each shard.
+
+## Measured
+
+Setup: v21.3.0 RelWithDebInfo with `common/measurement-switches.patch`,
+vstart, 3 BlueStore OSDs on brd ramdisks (the device is not the bottleneck,
+so per-op cost shows up as OSD CPU), 64-CPU host, 3 interleaved rounds, 30 s
+per workload (`common/osdperf-leg.sh`).
+Values are the mean of 3 runs, with [min..max]. Raw output:
+`results/2026-09-25-ab1.txt`.
+
+Switch 03 disables the dummy entirely: this is the **upper bound**; it is
+unsafe and only for measurement. Workload `ec4k`: `rados bench write -b 4096
+-t 16`, EC pool k=2 m=1 (`allow_ec_overwrites`, `allow_ec_optimizations`),
+32 PGs.
+
+| | stock | dummy off | change |
+|---|---|---|---|
+| BlueStore transactions per client write | 5.18 [5.17..5.19] | 3.00 [3..3] | −42% |
+| OSD CPU per client write (3 OSDs) | 1003 µs [993..1012] | 751 µs [713..774] | −25% |
+| `tp_osd_tp` context switches per write | 22.1 | 14.4 | −35% |
+| client IOPS | 19.8k [19.3k..20.2k] | 21.5k [20.9k..21.8k] | +8.9% |
+| client latency | 0.81 ms | 0.74 ms | −8% |
+
+- The ranges do not overlap.
+- A write touches 3 shards, so 2.18 extra transactions per write means the
+  dummy followed about 73% of the writes, as the theory said.
+- A real fix (the delayed dummy below) keeps part of the dummy's cost, so its
+  gain lies between the two columns.
 
 ## Proposed change
 

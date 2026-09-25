@@ -1,0 +1,6 @@
+Switch 02 check: calls counted over ~22 s (12 s idle, then 10 s of rados bench rand -t 64) (4 KiB objects, pool size 3, 32 PGs)
+counted with bpftrace uprobes on the same ceph-osd binary, fresh cluster per run.
+
+patches   reads     PG::publish_stats_to_osd   PeeringState::prepare_stats_for_publish (full path)
+none      594935    594936                     594936
+02        544086    544087                     320

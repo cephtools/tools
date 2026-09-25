@@ -121,4 +121,4 @@ reproducer that was run and confirmed. See `trackers/README.md`;
 which source changes would give it back, each candidate with its theory, the
 proposed change, how to observe it, and the workload. See `perf/README.md`;
 `perf/osd-2026-09/` covers 13 candidates in the classic OSD path (code analysis
-of v21.3.0, not yet measured).
+of v21.3.0, with measurements of the first three).
