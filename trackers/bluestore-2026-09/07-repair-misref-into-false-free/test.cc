@@ -1,4 +1,3 @@
-// ===== candidate: misref-repair-into-false-free
 // Add to src/test/objectstore/store_test.cc (after BluestoreRepairTest)
 //
 // fsck repair fixes misreferenced extents (BlueStore.cc:~11560-11760) BEFORE it

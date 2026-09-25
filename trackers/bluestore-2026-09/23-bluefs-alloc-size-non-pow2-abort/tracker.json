@@ -1,0 +1,18 @@
+{
+ "issue": {
+  "project_id": "bluestore",
+  "tracker_id": 1,
+  "subject": "bluefs_alloc_size / bluefs_shared_alloc_size that are not a power of 2 are accepted, then abort in the allocator",
+  "description": "|Kind|crash at mkfs instead of a validation error|\n|Severity|minor|\n|Config|@bluefs_shared_alloc_size@ (single device) or @bluefs_alloc_size@ (dedicated DB/WAL) set to a non-power-of-2 value; both options are level advanced (defaults 64K and 1M)|\n|Affected|main. Reproduced on origin/main 8e6a13e7a9a|\n\nh3. Summary\n\n@BlueFS::_init_alloc()@ (BlueFS.cc:823-915) only asserts that\n@bluefs_shared_alloc_size@ is a multiple of @min_alloc_size@\n(@ceph_assert(0 == p2phase(shared_alloc_size, unit))@, 841) and that @bluefs_alloc_size@\nis non-zero (@ceph_assert(alloc_size[id])@, 873). The first BlueFS allocation then passes\nthe unit to the allocator, which aborts with\n@ceph_assert(std::has_single_bit(unit))@ (HybridAllocator_impl.h:27). The only\npower-of-2 check is in the admin-socket \"bluefs device info\" command (BlueFS.cc:141).\n\nBy reading (not reproduced): on an existing OSD, the crash happens at the first BlueFS\nallocation after the option is changed.\n\nh3. Reproduction\n\n@repro.sh@: mkfs a single-device OSD with @--bluefs-shared-alloc-size=96K@; mkfs with a\ndedicated DB and @--bluefs-alloc-size=1536K@; control with defaults.\n\nh3. Observed (origin/main 8e6a13e7a9a)\n\n<pre>\n== control (defaults)\n  [control] mkfs+fsck ok\n== single device, bluefs_shared_alloc_size=96K (multiple of 4K min_alloc, not pow2)\n  [shared96K] mkfs CRASHED:\n    src/os/bluestore/HybridAllocator_impl.h: 27: FAILED ceph_assert(std::has_single_bit(unit))\n== dedicated DB, bluefs_alloc_size=1536K\n  [db1536K] mkfs CRASHED:\n    src/os/bluestore/HybridAllocator_impl.h: 27: FAILED ceph_assert(std::has_single_bit(unit))\n</pre>\n\nh3. Suggested fix\n\nValidate both options in @_init_alloc()@ / mkfs (power of 2, >= min_alloc_size) and fail\nwith -EINVAL.\n\nh3. Reproducer files\n\n* \"repro.sh\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/23-bluefs-alloc-size-non-pow2-abort/repro.sh\n* Test patch for all gtests: \"bluestore-bughunt-tests.patch\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch\n",
+  "custom_fields": [
+   {
+    "id": 4,
+    "value": "3 - minor"
+   },
+   {
+    "id": 13,
+    "value": "0"
+   }
+  ]
+ }
+}

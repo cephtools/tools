@@ -1,0 +1,18 @@
+{
+ "issue": {
+  "project_id": "bluestore",
+  "tracker_id": 1,
+  "subject": "BlueStore: _remove_collection dereferences the CollectionRef before its own ENOENT check",
+  "description": "|Kind|SIGSEGV instead of a clean error (ObjectStore API misuse)|\n|Severity|minor|\n|Config|default|\n|Affected|main. Reproduced on origin/main 8e6a13e7a9a|\n\nh3. Summary\n\n<pre>\nint BlueStore::_remove_collection(TransContext *txc, const coll_t &cid, CollectionRef *c)\n  ...\n  (*c)-&gt;flush_all_but_last();            // BlueStore.cc:19130, dereference first\n  {\n    std::unique_lock l(coll_lock);\n    if (!*c) { r = -ENOENT; goto out; }  // the check comes too late\n</pre>\n@OP_RMCOLL@ (16288) for a collection that does not exist segfaults instead of returning\n-ENOENT. With the default config the OSD aborts either way, because -ENOENT from\nOP_RMCOLL ends in @ceph_abort_msg(\"unexpected error\")@ (16363-16370); the fix matters for\ndiagnosability (transaction dump instead of a bare SIGSEGV) and for\n@objectstore_debug_throw_on_failed_txc=true@ (level dev).\n\nh3. Reproduction\n\ngtest @StoreTest.RemoveMissingCollectionENOENT@ (@test.cc@; sets\n@objectstore_debug_throw_on_failed_txc=true@ and expects -ENOENT).\n\nh3. Observed (origin/main 8e6a13e7a9a)\n\n<pre>\n*** Caught signal (Segmentation fault) **\n 2: (BlueStore::Collection::flush_all_but_last()+0x16)\n 3: (BlueStore::_remove_collection(BlueStore::TransContext*, coll_t const&, boost::intrusive_ptr&lt;BlueStore::Collection&gt;*)+0x56)\n 4: (BlueStore::_txc_add_transaction(BlueStore::TransContext*, ceph::os::Transaction*)+0x2b5)\n</pre>\n\nh3. Suggested fix\n\nMove the @if (!*c)@ check before @(*c)->flush_all_but_last()@.\n\nh3. Reproducer files\n\n* \"test.cc\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/19-remove-missing-collection-segfault/test.cc\n* Test patch for all gtests: \"bluestore-bughunt-tests.patch\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch\n",
+  "custom_fields": [
+   {
+    "id": 4,
+    "value": "3 - minor"
+   },
+   {
+    "id": 13,
+    "value": "0"
+   }
+  ]
+ }
+}

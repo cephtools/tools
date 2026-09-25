@@ -1,39 +1,48 @@
-# bluestore_freelist_blocks_per_key is not validated: 0 -> SIGFPE, not multiple of 8 -> buffer assert at mkfs
+# bluestore_freelist_blocks_per_key is not validated: 0 -> SIGFPE, not multiple of 8 -> assert, non-pow2 -> _xor abort
 
 | | |
 |---|---|
 | Component | bluestore (BitmapFreelistManager), configuration |
-| Kind | mkfs crash; value persisted on disk at mkfs |
+| Kind | mkfs crash (0, not a multiple of 8) / runtime abort (non-power-of-2 multiple of 8); the value is persisted at mkfs |
 | Severity | minor |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Config | `bluestore_freelist_blocks_per_key` (level dev, default 128) set to an invalid value at mkfs; only used with the bitmap freelist (rotational DB, i.e. default HDD OSDs, or `bluestore_allocation_from_file=false`) |
+| Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
-Used whenever the freelist is "bitmap" (rotational DB, i.e. default HDD OSDs, or
-`bluestore_allocation_from_file=false`). `BitmapFreelistManager::create()` persists
-the value verbatim (BitmapFreelistManager.cc:76). `_init_misc()` (292-302) builds a
-`blocks_per_key >> 3` byte buffer and `key_mask = ~(bytes_per_key - 1)` (valid only
-for powers of 2); `size_2_block_count()` (597-602) divides by it.
-- 0 -> division by zero (SIGFPE) during mkfs;
-- not a multiple of 8 -> `buffer.cc: FAILED ceph_assert(n < _len)`;
-- multiple of 8 but not a power of 2 -> non-contiguous key mask (multi-key `_xor`
-  asserts / enumerate may report used space as free).
+`BitmapFreelistManager::create()` reads the option (BitmapFreelistManager.cc:76) and
+persists it (101-102) without any check. `_init_misc()` (292-302) builds a
+`blocks_per_key >> 3` byte buffer and `key_mask = ~(bytes_per_key - 1)`, which is valid
+only for powers of 2; `size_2_block_count()` (597-602) divides by it.
+- 0: division by zero (SIGFPE) during mkfs;
+- not a multiple of 8 (e.g. 4): `buffer.cc: FAILED ceph_assert(n < _len)` during mkfs;
+- a multiple of 8 that is not a power of 2 (e.g. 96): the key mask is not contiguous and
+  an allocation spanning keys hits `ceph_assert(first_key == last_key)` in `_xor()` (577).
+  By code it could also make `enumerate_next()` report used space as free (not demonstrated).
 
 ## Reproduction
-`repro.sh` (and `test.cc` for 96): mkfs with `--bluestore-allocation-from-file=false
---bluestore-freelist-blocks-per-key={128,0,4,96}` then fsck.
+- `repro.sh`: mkfs with `--bluestore-allocation-from-file=false
+  --bluestore-freelist-blocks-per-key={128,0,4,96}`, then fsck.
+- gtest `StoreTestSpecificAUSize.FreelistBlocksPerKeyNonPow2` (`test.cc`): 96, 1 MiB writes and removes.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
-blocks_per_key=128: mkfs+fsck clean
-blocks_per_key=0:   mkfs CRASHED
-blocks_per_key=4:   mkfs CRASHED  buffer.cc: 536: FAILED ceph_assert(n < _len)
-blocks_per_key=96:  mkfs+fsck clean (small device; single-key allocations only)
+== blocks_per_key=128 (bitmap freelist: allocation_from_file=false)
+  mkfs+fsck clean
+== blocks_per_key=0 (bitmap freelist: allocation_from_file=false)
+  mkfs CRASHED:
+*** Caught signal (Floating point exception) **
+== blocks_per_key=4 (bitmap freelist: allocation_from_file=false)
+  mkfs CRASHED:
+    src/common/buffer.cc: 536: FAILED ceph_assert(n < _len)
+== blocks_per_key=96 (bitmap freelist: allocation_from_file=false)
+  mkfs+fsck clean        (small device, single-key allocations only)
 ```
-`test.cc` -> `StoreTestSpecificAUSize.FreelistBlocksPerKeyNonPow2` (96, 1 MiB writes/removes):
+gtest with 96:
 ```
-BitmapFreelistManager.cc: 577: FAILED ceph_assert(first_key == last_key)
+src/os/bluestore/BitmapFreelistManager.cc: 577: FAILED ceph_assert(first_key == last_key)
+ 2: (BitmapFreelistManager::allocate(unsigned long, unsigned long, std::shared_ptr<KeyValueDB::TransactionImpl>)+0x81)
+ 3: (BlueStore::_txc_finalize_kv(BlueStore::TransContext*, std::shared_ptr<KeyValueDB::TransactionImpl>)+0x117)
 ```
 
 ## Suggested fix
-Validate at mkfs: power of 2, >= 8 (return -EINVAL).
+Validate at mkfs: power of 2 and >= 8, otherwise fail with -EINVAL.

@@ -3,24 +3,32 @@
 | | |
 |---|---|
 | Component | ceph-bluestore-tool |
-| Kind | tool reports success on failure (automation may proceed with a half-resharded / locked DB) |
+| Kind | wrong exit status; scripts cannot detect the failure |
 | Severity | minor |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Config | any |
+| Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
-`bluestore_tool.cc:1397-1403` prints `error resharding: ...` but does not
-`exit(EXIT_FAILURE)`. This covers bad specs (-EINVAL) and mid-way failures that
-leave the "resharding in progress" marker (OSD refuses to open).
+The `reshard` action (bluestore_tool.cc:1397-1403) prints `error resharding: ...` but
+does not `exit(EXIT_FAILURE)`, so the tool exits 0. This covers:
+- a bad sharding spec: `-EINVAL` from `prepare_for_reshard()`, returned before the
+  resharding lock is taken, so the DB is unchanged (the repro case);
+- errors after the lock is taken (`reshard_cleanup()` failure, `-EIO` writing the sharding
+  definition, RocksDBStore.cc:3775-3923), which may leave the
+  `reshardingXcommencingXlocked` marker; the OSD then refuses to open while the tool
+  still reported success.
 
 ## Reproduction
 `repro.sh`: `ceph-bluestore-tool --path <osd> --sharding "m(x) p(3)" reshard; echo $?`
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
+== current sharding
+m(3) p(3,0-12) O(3,0-13)=block_cache={type=binned_lru} L=min_write_buffer_number_to_merge=32 P=min_write_buffer_number_to_merge=32
+== reshard with an invalid spec (parse error -> -EINVAL)
 error resharding: (22) Invalid argument
 rc=0
 ```
 
 ## Suggested fix
-Return a non-zero exit code on any reshard error.
+Exit with a non-zero status on any reshard error.

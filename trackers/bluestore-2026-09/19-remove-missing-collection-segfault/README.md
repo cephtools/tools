@@ -1,30 +1,39 @@
-# _remove_collection dereferences the CollectionRef before its own ENOENT check -> SIGSEGV
+# BlueStore: _remove_collection dereferences the CollectionRef before its own ENOENT check
 
 | | |
 |---|---|
 | Component | bluestore |
-| Kind | crash |
-| Severity | minor (ObjectStore API misuse / replay of a txn removing a missing collection) |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Kind | SIGSEGV instead of a clean error (ObjectStore API misuse) |
+| Severity | minor |
+| Config | default |
+| Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
 ```
 int BlueStore::_remove_collection(TransContext *txc, const coll_t &cid, CollectionRef *c)
-  (*c)->flush_all_but_last();          // BlueStore.cc:19130 - deref first
-  { std::unique_lock l(coll_lock);
-    if (!*c) { r = -ENOENT; goto out; } // check comes too late
+  ...
+  (*c)->flush_all_but_last();            // BlueStore.cc:19130, dereference first
+  {
+    std::unique_lock l(coll_lock);
+    if (!*c) { r = -ENOENT; goto out; }  // the check comes too late
 ```
-`OP_RMCOLL` for a non-existent collection segfaults instead of returning -ENOENT.
+`OP_RMCOLL` (16288) for a collection that does not exist segfaults instead of returning
+-ENOENT. With the default config the OSD aborts either way, because -ENOENT from
+OP_RMCOLL ends in `ceph_abort_msg("unexpected error")` (16363-16370); the fix matters for
+diagnosability (transaction dump instead of a bare SIGSEGV) and for
+`objectstore_debug_throw_on_failed_txc=true` (level dev).
 
 ## Reproduction
-`test.cc` -> `StoreTest.RemoveMissingCollectionENOENT` (with objectstore_debug_throw_on_failed_txc).
+gtest `StoreTest.RemoveMissingCollectionENOENT` (`test.cc`; sets
+`objectstore_debug_throw_on_failed_txc=true` and expects -ENOENT).
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
-bluestore: *** Caught signal (Segmentation fault) **
-memstore:  [ OK ]
+*** Caught signal (Segmentation fault) **
+ 2: (BlueStore::Collection::flush_all_but_last()+0x16)
+ 3: (BlueStore::_remove_collection(BlueStore::TransContext*, coll_t const&, boost::intrusive_ptr<BlueStore::Collection>*)+0x56)
+ 4: (BlueStore::_txc_add_transaction(BlueStore::TransContext*, ceph::os::Transaction*)+0x2b5)
 ```
 
 ## Suggested fix
-Move the `!*c` check before `flush_all_but_last()`.
+Move the `if (!*c)` check before `(*c)->flush_all_but_last()`.

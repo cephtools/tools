@@ -1,0 +1,59 @@
+Project: bluestore | Tracker: Bug | Severity: 2 - major | Regression: 0
+Subject: BlueStore: undecodable deferred txn passes fsck, repair fails with EIO, OSD cannot mount
+
+|Kind|fsck false negative; unrecoverable OSD start failure|
+|Severity|major|
+|Config|default; needs an on-disk corrupt value under the deferred prefix @L@ (injected here with ceph-kvstore-tool)|
+|Affected|main. Reproduced on origin/main 8e6a13e7a9a|
+|Related|tracker 49847 (field report of this mount failure, closed as a hardware problem)|
+
+h3. Summary
+
+* Regular fsck walks @PREFIX_DEFERRED@ (@L@) and logs @fsck error: failed to decode deferred txn@ (BlueStore.cc:11885-11905) but never increments the error count, so it prints "fsck success" and exits 0.
+* Repair (and, by code, @fsck --deep@) first runs @_deferred_replay()@ when not read-only (BlueStore.cc:11156-11164), which fails with -EIO on the same record (~16031). The existing "remove undecodable deferred record" repair in @_fsck_on_open()@ is therefore never reached.
+* Mount fails with EIO.
+
+Result: fsck says the store is healthy, the OSD cannot start, and repair cannot fix it.
+
+h3. Reproduction
+
+@repro.sh@ (uses @common/common.sh@): mkfs a file-backed OSD; inject a 1-byte value with
+@ceph-kvstore-tool bluestore-kv <osd> set L zzzz in <file>@; run fsck, repair, and a
+@ceph-objectstore-tool --op list@ mount.
+
+h3. Observed (origin/main 8e6a13e7a9a)
+
+<pre>
+== regular fsck (must NOT report success)
+bluestore(/root/bh/fsck-deferred) fsck error: failed to decode deferred txn 'zzzz'
+fsck success
+fsck rc=0
+== repair (should remove the bad record and succeed)
+bluestore(/root/bh/fsck-deferred) _deferred_replay failed to decode deferred txn 'zzzz'
+repair failed: (5) Input/output error
+repair rc=1
+</pre>
+@ceph-objectstore-tool --no-mon-config --data-path <osd> --op list@ (run separately):
+<pre>
+Mount failed with '(5) Input/output error'
+BlueStore.cc: 5856: FAILED ceph_assert(db == __null)
+ 2: (BlueStore::~BlueStore()+0xe)
+</pre>
+(The destructor assert after the failed mount is a separate problem in the error path;
+it is only observed here, not analysed.)
+
+h3. Expected
+
+fsck reports the error (non-zero exit); repair removes the undecodable record (warning
+that the deferred write it covered is lost, so that data may be stale) and the OSD can mount.
+
+h3. Suggested fix
+
+Count the decode failure as an fsck error (with a matching @++repaired@ in repair mode).
+In repair mode only, let @_deferred_replay()@ skip undecodable records, or run the
+removal before replay. Normal mount should keep failing.
+
+h3. Reproducer files
+
+* "repro.sh":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/09-fsck-ignores-undecodable-deferred/repro.sh
+* Test patch for all gtests: "bluestore-bughunt-tests.patch":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch

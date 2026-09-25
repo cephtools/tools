@@ -1,4 +1,3 @@
-// ===== candidate: envmode-ino-reuse-stale-envelopes
 // Append to src/test/objectstore/test_bluefs.cc (after the BlueFS_wal fixture).
 //
 // A WAL that gets a re-issued ino (after compaction + remount) shares the

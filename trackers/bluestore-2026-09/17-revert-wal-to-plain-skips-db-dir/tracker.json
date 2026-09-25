@@ -1,0 +1,18 @@
+{
+ "issue": {
+  "project_id": "bluestore",
+  "tracker_id": 1,
+  "subject": "BlueFS revert_wal_to_plain ignores envelope WAL files in db/ (no db.wal dir); tool reports success",
+  "description": "|Kind|downgrade tool silently ineffective (on-disk format left as v2)|\n|Severity|minor (downgrade of OSDs created before Nautilus only)|\n|Config|default @bluefs_wal_envelope_mode=true@ (v20+); OSDs created before Nautilus (v14.1.0, commit 57abe887683), which have no @db.wal@ directory and keep the RocksDB WAL in @db/@|\n|Affected|main (envelope mode, v20+). Reproduced on origin/main 8e6a13e7a9a|\n\nh3. Summary\n\n@BlueFS::revert_wal_to_plain()@ (BlueFS.cc:2460-2490) only looks at @\"db.wal\"@. OSDs\ncreated since Nautilus get @db.wal/@ at mkfs (BlueStore.cc:8268), but older OSDs keep the\nWAL files in @db/@. On such an OSD it returns 0 (\"No files needed to move\") and leaves the\nenvelope (v2) WAL files unconverted, so the tool reports success. An older release\nwithout envelope support may then fail to mount BlueFS or replay the WAL (not tested).\n@BlueStore::revert_wal_to_plain()@ (BlueStore.cc:11168-11178) also ignores BlueFS's return value.\n\nThe same root cause makes the function abort when @db.wal@ exists and an envelope file is\nelsewhere: after converting @db.wal/@, @_compact_log_sync_LNF_LD()@ keeps\n@log.uses_envelope_mode@ set (set at mount if any file is envelope, BlueFS.cc:1170-1174;\ncleared by compaction only when all files are plain, 3128-3134), and\n@ceph_assert(!log.uses_envelope_mode)@ (2484) fires. A real OSD does not have envelope\nlogs in both directories; this variant only shows that files outside @db.wal@ are not handled.\n\nThe @bluefs_wal_envelope_mode@ description mentions a @downgrade-wal-to-v1@ command that\ndoes not exist; the tool command is @revert-wal-to-plain@.\n\nh3. Reproduction\n\ngtests (@test.cc@, in @src/test/objectstore/test_bluefs.cc@):\n@BlueFS_wal.bughunt_revert_wal_to_plain_skips_db_dir@ and\n@BlueFS_wal.bughunt_revert_wal_to_plain_asserts_with_db_wal@.\n\nh3. Observed (origin/main 8e6a13e7a9a)\n\n<pre>\ntest_bluefs.cc:3257: Failure\nValue of: still_envelope\n  Actual: true\nExpected: false\nrevert_wal_to_plain left an envelope-mode WAL in 'db' untouched\n\nsrc/os/bluestore/BlueFS.cc: 2484: FAILED ceph_assert(!log.uses_envelope_mode)\n</pre>\n\nh3. Suggested fix\n\nConvert every envelope-mode file in @nodes.file_map@ (or iterate over all directories),\nnot only @db.wal@; propagate the error from @BlueStore::revert_wal_to_plain()@.\n\nh3. Reproducer files\n\n* \"test.cc\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/17-revert-wal-to-plain-skips-db-dir/test.cc\n* Test patch for all gtests: \"bluestore-bughunt-tests.patch\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch\n",
+  "custom_fields": [
+   {
+    "id": 4,
+    "value": "3 - minor"
+   },
+   {
+    "id": 13,
+    "value": "0"
+   }
+  ]
+ }
+}

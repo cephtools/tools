@@ -1,0 +1,18 @@
+{
+ "issue": {
+  "project_id": "bluestore",
+  "tracker_id": 1,
+  "subject": "bluestore_fsck_read_bytes_cap=0 makes deep fsck/repair loop forever",
+  "description": "|Kind|hang (100% CPU)|\n|Severity|minor|\n|Config|@bluestore_fsck_read_bytes_cap=0@ (level advanced, default 64M, runtime, no @min@) with a deep fsck: @ceph-bluestore-tool fsck/repair --deep@, or an OSD with @bluestore_fsck_on_mount=true@ and @bluestore_fsck_on_mount_deep=true@ (both dev, default false)|\n|Affected|main, since ced308000ae (v14.1.0). Reproduced on origin/main 8e6a13e7a9a|\n\nh3. Summary\n\nIn the deep branch of @_fsck_check_objects()@ (BlueStore.cc:11038-11057):\n<pre>\nuint64_t max_read_block = cct-&gt;_conf-&gt;bluestore_fsck_read_bytes_cap;\nuint64_t offset = 0;\ndo {\n  uint64_t l = std::min(uint64_t(o-&gt;onode.size - offset), max_read_block);\n  ...\n  offset += l;\n} while (offset &lt; o-&gt;onode.size);\n</pre>\nWith the cap at 0, @l@ is 0, @offset@ never advances, and the loop never ends for any\nobject with size > 0 (the OSD superblock written by mkfs is enough). Ceph often uses 0\nto mean \"unlimited\", so this value is a plausible thing to set.\n\nh3. Reproduction\n\n@repro.sh@: mkfs a 4G OSD; run @fsck --deep 1@ with the default cap (control) and with\n@--bluestore_fsck_read_bytes_cap=0@ under @timeout 120@.\n\nh3. Observed (origin/main 8e6a13e7a9a)\n\n<pre>\n== control: fsck --deep 1 with default cap\nfsck success\nrc=0\n== fsck --deep 1 with bluestore_fsck_read_bytes_cap=0 (timeout 120s)\nrc=124 after 120s\n</pre>\nA 5 s run at @debug_bluestore=20@ logs 5,267,035 lines of zero-length reads.\n\nh3. Suggested fix\n\nAdd @min: 4_K@ to the option and guard in code as well\n(@max_read_block = std::max<uint64_t>(cap, min_alloc_size)@, or treat 0 as \"no cap\"),\nsince the yaml @min@ does not protect callers that set the value through the API.\n\nh3. Reproducer files\n\n* \"repro.sh\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/21-fsck-read-bytes-cap-zero-hang/repro.sh\n* Test patch for all gtests: \"bluestore-bughunt-tests.patch\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch\n",
+  "custom_fields": [
+   {
+    "id": 4,
+    "value": "3 - minor"
+   },
+   {
+    "id": 13,
+    "value": "0"
+   }
+  ]
+ }
+}

@@ -3,25 +3,41 @@
 | | |
 |---|---|
 | Component | bluestore (fsck), configuration |
-| Kind | hang (100% CPU); OSD with deep fsck on mount never boots |
+| Kind | hang (100% CPU) |
 | Severity | minor |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58); since ced308000ae |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Config | `bluestore_fsck_read_bytes_cap=0` (level advanced, default 64M, runtime, no `min`) with a deep fsck: `ceph-bluestore-tool fsck/repair --deep`, or an OSD with `bluestore_fsck_on_mount=true` and `bluestore_fsck_on_mount_deep=true` (both dev, default false) |
+| Affected | main, since ced308000ae (v14.1.0). Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
-Option has no `min` (global.yaml.in ~5640). In `_fsck_check_objects` deep branch
-(BlueStore.cc:11038-11055) `l = min(size - offset, max_read_block)` is 0 when the
-cap is 0; `_do_read` returns 0 bytes, `offset += 0`, `while (offset < size)` never ends.
+In the deep branch of `_fsck_check_objects()` (BlueStore.cc:11038-11057):
+```
+uint64_t max_read_block = cct->_conf->bluestore_fsck_read_bytes_cap;
+uint64_t offset = 0;
+do {
+  uint64_t l = std::min(uint64_t(o->onode.size - offset), max_read_block);
+  ...
+  offset += l;
+} while (offset < o->onode.size);
+```
+With the cap at 0, `l` is 0, `offset` never advances, and the loop never ends for any
+object with size > 0 (the OSD superblock written by mkfs is enough). Ceph often uses 0
+to mean "unlimited", so this value is a plausible thing to set.
 
 ## Reproduction
-`repro.sh`: mkfs a 4G OSD; `fsck --deep 1` (control) and
-`fsck --deep 1 --bluestore_fsck_read_bytes_cap=0` under `timeout 120`.
+`repro.sh`: mkfs a 4G OSD; run `fsck --deep 1` with the default cap (control) and with
+`--bluestore_fsck_read_bytes_cap=0` under `timeout 120`.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
-== control: fsck --deep 1 with default cap -> fsck success, rc=0
-== cap=0 -> rc=124 after 120s; 5s at debug_bluestore=20 logs 5896170 lines ('_do_read 0x0~0')
+== control: fsck --deep 1 with default cap
+fsck success
+rc=0
+== fsck --deep 1 with bluestore_fsck_read_bytes_cap=0 (timeout 120s)
+rc=124 after 120s
 ```
+A 5 s run at `debug_bluestore=20` logs 5,267,035 lines of zero-length reads.
 
 ## Suggested fix
-Add `min: 4_K` (or treat 0 as "no cap").
+Add `min: 4_K` to the option and guard in code as well
+(`max_read_block = std::max<uint64_t>(cap, min_alloc_size)`, or treat 0 as "no cap"),
+since the yaml `min` does not protect callers that set the value through the API.

@@ -1,0 +1,18 @@
+{
+ "issue": {
+  "project_id": "bluestore",
+  "tracker_id": 1,
+  "subject": "bluestore_freelist_blocks_per_key is not validated: 0 -> SIGFPE, not multiple of 8 -> assert, non-pow2 -> _xor abort",
+  "description": "|Kind|mkfs crash (0, not a multiple of 8) / runtime abort (non-power-of-2 multiple of 8); the value is persisted at mkfs|\n|Severity|minor|\n|Config|@bluestore_freelist_blocks_per_key@ (level dev, default 128) set to an invalid value at mkfs; only used with the bitmap freelist (rotational DB, i.e. default HDD OSDs, or @bluestore_allocation_from_file=false@)|\n|Affected|main. Reproduced on origin/main 8e6a13e7a9a|\n\nh3. Summary\n\n@BitmapFreelistManager::create()@ reads the option (BitmapFreelistManager.cc:76) and\npersists it (101-102) without any check. @_init_misc()@ (292-302) builds a\n@blocks_per_key >> 3@ byte buffer and @key_mask = ~(bytes_per_key - 1)@, which is valid\nonly for powers of 2; @size_2_block_count()@ (597-602) divides by it.\n* 0: division by zero (SIGFPE) during mkfs;\n* not a multiple of 8 (e.g. 4): @buffer.cc: FAILED ceph_assert(n < _len)@ during mkfs;\n* a multiple of 8 that is not a power of 2 (e.g. 96): the key mask is not contiguous and an allocation spanning keys hits @ceph_assert(first_key == last_key)@ in @_xor()@ (577). By code it could also make @enumerate_next()@ report used space as free (not demonstrated).\n\nh3. Reproduction\n\n* @repro.sh@: mkfs with @--bluestore-allocation-from-file=false --bluestore-freelist-blocks-per-key={128,0,4,96}@, then fsck.\n* gtest @StoreTestSpecificAUSize.FreelistBlocksPerKeyNonPow2@ (@test.cc@): 96, 1 MiB writes and removes.\n\nh3. Observed (origin/main 8e6a13e7a9a)\n\n<pre>\n== blocks_per_key=128 (bitmap freelist: allocation_from_file=false)\n  mkfs+fsck clean\n== blocks_per_key=0 (bitmap freelist: allocation_from_file=false)\n  mkfs CRASHED:\n*** Caught signal (Floating point exception) **\n== blocks_per_key=4 (bitmap freelist: allocation_from_file=false)\n  mkfs CRASHED:\n    src/common/buffer.cc: 536: FAILED ceph_assert(n &lt; _len)\n== blocks_per_key=96 (bitmap freelist: allocation_from_file=false)\n  mkfs+fsck clean        (small device, single-key allocations only)\n</pre>\ngtest with 96:\n<pre>\nsrc/os/bluestore/BitmapFreelistManager.cc: 577: FAILED ceph_assert(first_key == last_key)\n 2: (BitmapFreelistManager::allocate(unsigned long, unsigned long, std::shared_ptr&lt;KeyValueDB::TransactionImpl&gt;)+0x81)\n 3: (BlueStore::_txc_finalize_kv(BlueStore::TransContext*, std::shared_ptr&lt;KeyValueDB::TransactionImpl&gt;)+0x117)\n</pre>\n\nh3. Suggested fix\n\nValidate at mkfs: power of 2 and >= 8, otherwise fail with -EINVAL.\n\nh3. Reproducer files\n\n* \"repro.sh\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/22-freelist-blocks-per-key-unvalidated/repro.sh\n* \"test.cc\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/22-freelist-blocks-per-key-unvalidated/test.cc\n* Test patch for all gtests: \"bluestore-bughunt-tests.patch\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch\n",
+  "custom_fields": [
+   {
+    "id": 4,
+    "value": "3 - minor"
+   },
+   {
+    "id": 13,
+    "value": "0"
+   }
+  ]
+ }
+}

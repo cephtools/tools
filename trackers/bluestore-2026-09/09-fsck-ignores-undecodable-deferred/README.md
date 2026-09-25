@@ -1,41 +1,56 @@
-# fsck reports "fsck success" for an undecodable deferred txn, repair cannot remove it, OSD cannot mount
+# BlueStore: undecodable deferred txn passes fsck, repair fails with EIO, OSD cannot mount
 
 | | |
 |---|---|
 | Component | bluestore (fsck/repair, deferred replay) |
-| Kind | unrecoverable OSD start failure; fsck false negative |
+| Kind | fsck false negative; unrecoverable OSD start failure |
 | Severity | major |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Related | tracker 49847 (field report of the mount failure, closed as HW) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Config | default; needs an on-disk corrupt value under the deferred prefix `L` (injected here with ceph-kvstore-tool) |
+| Affected | main. Reproduced on origin/main 8e6a13e7a9a |
+| Related | tracker 49847 (field report of this mount failure, closed as a hardware problem) |
 
 ## Summary
-- Regular fsck walks `PREFIX_DEFERRED` ("L") and prints
+- Regular fsck walks `PREFIX_DEFERRED` (`L`) and logs
   `fsck error: failed to decode deferred txn` (BlueStore.cc:11885-11905) but never
-  increments the error count -> exit 0 / "fsck success".
-- Repair (and deep fsck) first run `_deferred_replay()` during open
-  (BlueStore.cc:11156-11164), which fails with -EIO on the same record, so the
-  intended "remove undecodable deferred record" repair is unreachable.
-- Mount fails with EIO. Result: fsck says healthy, OSD cannot start, repair cannot fix.
+  increments the error count, so it prints "fsck success" and exits 0.
+- Repair (and, by code, `fsck --deep`) first runs `_deferred_replay()` when not
+  read-only (BlueStore.cc:11156-11164), which fails with -EIO on the same record
+  (~16031). The existing "remove undecodable deferred record" repair in
+  `_fsck_on_open()` is therefore never reached.
+- Mount fails with EIO.
+
+Result: fsck says the store is healthy, the OSD cannot start, and repair cannot fix it.
 
 ## Reproduction
-`repro.sh` (uses `../common/common.sh`): mkfs a file-backed OSD, inject a 1-byte value
-`ceph-kvstore-tool bluestore-kv <osd> set L zzzz in <file>`, run fsck, repair,
-and a `ceph-objectstore-tool --op list` mount.
+`repro.sh` (uses `common/common.sh`): mkfs a file-backed OSD; inject a 1-byte value with
+`ceph-kvstore-tool bluestore-kv <osd> set L zzzz in <file>`; run fsck, repair, and a
+`ceph-objectstore-tool --op list` mount.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
 == regular fsck (must NOT report success)
+bluestore(/root/bh/fsck-deferred) fsck error: failed to decode deferred txn 'zzzz'
 fsck success
 fsck rc=0
 == repair (should remove the bad record and succeed)
+bluestore(/root/bh/fsck-deferred) _deferred_replay failed to decode deferred txn 'zzzz'
 repair failed: (5) Input/output error
 repair rc=1
-== mount attempt via ceph-objectstore-tool -> abort
-BUG: fsck reported the undecodable deferred txn but exited 0 (fsck success)
-BUG: repair cannot fix undecodable deferred txn (rc=1)
 ```
+`ceph-objectstore-tool --no-mon-config --data-path <osd> --op list` (run separately):
+```
+Mount failed with '(5) Input/output error'
+BlueStore.cc: 5856: FAILED ceph_assert(db == __null)
+ 2: (BlueStore::~BlueStore()+0xe)
+```
+(The destructor assert after the failed mount is a separate problem in the error path;
+it is only observed here, not analysed.)
+
+## Expected
+fsck reports the error (non-zero exit); repair removes the undecodable record (warning
+that the deferred write it covered is lost, so that data may be stale) and the OSD can mount.
 
 ## Suggested fix
-Count the decode failure as an error; in repair mode skip/remove undecodable
-records in `_deferred_replay()` (or run the removal before replay).
+Count the decode failure as an fsck error (with a matching `++repaired` in repair mode).
+In repair mode only, let `_deferred_replay()` skip undecodable records, or run the
+removal before replay. Normal mount should keep failing.

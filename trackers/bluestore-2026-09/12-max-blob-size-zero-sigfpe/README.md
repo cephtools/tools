@@ -1,32 +1,39 @@
-# bluestore_max_blob_size{,_hdd,_ssd}=0 ("no limit") crashes write_v2 with SIGFPE
+# write_v2: bluestore_max_blob_size_{hdd,ssd}=0 causes SIGFPE in Writer::_split_data()
 
 | | |
 |---|---|
-| Component | bluestore, configuration |
-| Kind | crash (every uncompressed write) |
-| Severity | minor/major (write_v2 non-default; options are runtime) |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Component | bluestore (write_v2), configuration |
+| Kind | crash on every uncompressed write |
+| Severity | minor |
+| Config | non-default: `bluestore_write_v2=true` and the applicable `bluestore_max_blob_size_hdd` / `_ssd` set to 0 (all three blob-size options are `level: dev`, `runtime`, no `min`) |
+| Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
-The options are type `size`, `runtime`, no `min` (global.yaml.in:5045-5074); the
-doc says 0 = "no limit". `_set_blob_size()` copies 0 into `max_blob_size`;
-`_choose_write_options()` sets `wctx->target_blob_size = max_bsize = 0`. v1 hides it
-with `max(target_blob_size, min_alloc_size)`, but `Writer::_split_data()`
-(Writer.cc:1346,1350) divides by it -> SIGFPE.
+`_set_blob_size()` (BlueStore.cc:6114) uses `bluestore_max_blob_size` when non-zero,
+otherwise `bluestore_max_blob_size_hdd` / `_ssd`. When the applicable `_hdd` / `_ssd`
+value is 0, `max_blob_size` is 0 and `_choose_write_options()` sets
+`wctx->target_blob_size = 0` for uncompressed writes. The v1 path hides this with
+`max(target_blob_size, min_alloc_size)`, but `Writer::_split_data()` divides by it
+(Writer.cc:1346) -> SIGFPE. (Writer.cc:1350 `p2remain()` would compute garbage next.)
+Compressed writes are not affected, because the floor at BlueStore.cc:17946 raises
+`target_blob_size` to 2 x min_alloc_size.
+
+Setting only `bluestore_max_blob_size=0` is harmless (0 is its default and means "use
+the _hdd/_ssd value"). Its description says 0 means "no limit", which does not match
+the code.
 
 ## Reproduction
-`test.cc` -> `StoreTestSpecificAUSize.ZeroMaxBlobSizeWriteV2` (write_v2=true, all three options 0, write 64K).
-Cluster: `ceph config set osd bluestore_max_blob_size_ssd 0; ... _hdd 0` with write_v2 enabled.
+gtest `StoreTestSpecificAUSize.ZeroMaxBlobSizeWriteV2` (`test.cc`): `bluestore_write_v2=true`,
+`bluestore_max_blob_size{,_hdd,_ssd}=0`, write 64K.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
 *** Caught signal (Floating point exception) **
- 2: (BlueStore::Writer::_split_data(unsigned int, ceph::buffer::list&, ...)+0x63)
- 3: (BlueStore::Writer::do_write(unsigned int, ceph::buffer::list&)+0x93)
- 4: (BlueStore::_do_write_v2(...)
+ 2: (BlueStore::Writer::_split_data(unsigned int, ceph::buffer::v15_2_0::list&, std::vector<BlueStore::Writer::blob_data_t, ...>&)+0x63)
+ 3: (BlueStore::Writer::do_write(unsigned int, ceph::buffer::v15_2_0::list&)+0x93)
+ 4: (BlueStore::_do_write_v2(BlueStore::TransContext*, ...)
 ```
 
 ## Suggested fix
-Treat 0 as "unlimited" consistently (e.g. clamp to a max blob size) or add `min`
-validation; also guard `_split_data` / `can_reuse_blob` against 0.
+Reject 0 (add `min`) or treat it as "unlimited" consistently in both write paths, and
+guard `_split_data()` against a zero `target_blob_size`. Fix the option description.

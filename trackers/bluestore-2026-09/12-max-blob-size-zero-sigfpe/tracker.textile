@@ -1,0 +1,46 @@
+Project: bluestore | Tracker: Bug | Severity: 3 - minor | Regression: 0
+Subject: write_v2: bluestore_max_blob_size_{hdd,ssd}=0 causes SIGFPE in Writer::_split_data()
+
+|Kind|crash on every uncompressed write|
+|Severity|minor|
+|Config|non-default: @bluestore_write_v2=true@ and the applicable @bluestore_max_blob_size_hdd@ / @_ssd@ set to 0 (all three blob-size options are @level: dev@, @runtime@, no @min@)|
+|Affected|main. Reproduced on origin/main 8e6a13e7a9a|
+
+h3. Summary
+
+@_set_blob_size()@ (BlueStore.cc:6114) uses @bluestore_max_blob_size@ when non-zero,
+otherwise @bluestore_max_blob_size_hdd@ / @_ssd@. When the applicable @_hdd@ / @_ssd@
+value is 0, @max_blob_size@ is 0 and @_choose_write_options()@ sets
+@wctx->target_blob_size = 0@ for uncompressed writes. The v1 path hides this with
+@max(target_blob_size, min_alloc_size)@, but @Writer::_split_data()@ divides by it
+(Writer.cc:1346) -> SIGFPE. (Writer.cc:1350 @p2remain()@ would compute garbage next.)
+Compressed writes are not affected, because the floor at BlueStore.cc:17946 raises
+@target_blob_size@ to 2 x min_alloc_size.
+
+Setting only @bluestore_max_blob_size=0@ is harmless (0 is its default and means "use
+the _hdd/_ssd value"). Its description says 0 means "no limit", which does not match
+the code.
+
+h3. Reproduction
+
+gtest @StoreTestSpecificAUSize.ZeroMaxBlobSizeWriteV2@ (@test.cc@): @bluestore_write_v2=true@,
+@bluestore_max_blob_size{,_hdd,_ssd}=0@, write 64K.
+
+h3. Observed (origin/main 8e6a13e7a9a)
+
+<pre>
+*** Caught signal (Floating point exception) **
+ 2: (BlueStore::Writer::_split_data(unsigned int, ceph::buffer::v15_2_0::list&, std::vector&lt;BlueStore::Writer::blob_data_t, ...&gt;&)+0x63)
+ 3: (BlueStore::Writer::do_write(unsigned int, ceph::buffer::v15_2_0::list&)+0x93)
+ 4: (BlueStore::_do_write_v2(BlueStore::TransContext*, ...)
+</pre>
+
+h3. Suggested fix
+
+Reject 0 (add @min@) or treat it as "unlimited" consistently in both write paths, and
+guard @_split_data()@ against a zero @target_blob_size@. Fix the option description.
+
+h3. Reproducer files
+
+* "test.cc":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/12-max-blob-size-zero-sigfpe/test.cc
+* Test patch for all gtests: "bluestore-bughunt-tests.patch":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch

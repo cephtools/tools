@@ -1,43 +1,54 @@
-# write_v2: released AU reused in the same txn as deferred target, later direct write into its "unused" part is overwritten by an older queued deferred write
+# BlueStore write_v2: reusing a same-txn released AU lets a stale deferred write overwrite a later direct write
 
 | | |
 |---|---|
 | Component | bluestore (write_v2 / Writer) |
-| Kind | silent data corruption (EIO on read) |
-| Severity | major for `bluestore_write_v2=true` (non-default; randomized in debug builds) |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Kind | data corruption (detected as csum EIO; silent with `bluestore_csum_type=none`) |
+| Severity | major for affected configs |
+| Config | non-default: `bluestore_write_v2=true` (default false; needed for recompression), `min_alloc_size > block_size` (defaults are 4K for HDD and SSD, so legacy 16K/64K OSDs or explicit setting), `prefer_deferred_size > 0` (HDD default 64K; SSD default 0, so SSD is not affected). The repro widens the window with `bluestore_deferred_batch_ops=1000` and `bluestore_max_defer_interval=1000` |
+| Affected | main (write_v2 since PR #54504). Reproduced on origin/main 8e6a13e7a9a; the v1 write path passes the same test |
 
 ## Summary
-`Writer::_defer_or_allocate()` (Writer.cc:1311-1335) reuses space released
-*in the same transaction* (`released`) as the target of a deferred write, and the
-new blob marks the rest of the AU unused (`add_unused_all()`, Writer.cc:513).
-A later small write into that unused part is issued as a direct aio write.
-An older deferred write to the same disk bytes (from a previous txc, still in the
-deferred queue) is applied afterwards and overwrites the new data. v1 avoids this
-by releasing space to the allocator only after preceding deferred writes finished
-(`_txc_finish`).
+`Writer::_defer_or_allocate()` (Writer.cc:1312-1336) reuses space released *in the
+same transaction* (`released`) as the target of a deferred write, and the new blob
+marks the rest of the allocation unit unused (`add_unused_all()`, Writer.cc:512-514,
+only when `min_alloc_size != block_size`). A later small write into that unused part
+is issued as a direct aio write. An older deferred write to the same disk bytes, from
+an earlier txc and still in the deferred queue, is applied afterwards and overwrites
+the new data.
+
+v1 avoids this by releasing space to the allocator only after all preceding txcs on
+the sequencer have finished their deferred writes (`_txc_finish`, BlueStore.cc:15194-15200).
 
 ## Reproduction
-`test.cc` -> `StoreTestSpecificAUSize.DeferredReuseRaceV1` / `V2`
-(min_alloc 16K, `bluestore_prefer_deferred_size=65536`, `bluestore_deferred_batch_ops=1000`,
-`bluestore_max_defer_interval=1000`):
-write 16K A; write 8K~4K B (deferred); zero 4K~12K; write 0~4K C (AU reused deferred);
-write 8K~4K D (direct into unused); remount; read 0~12K.
+gtests `StoreTestSpecificAUSize.DeferredReuseRaceV1` (control) and `...V2` (`test.cc`),
+min_alloc_size 16K:
+1. write 16K `A`;
+2. write 8K~4K `B` (deferred overwrite, stays queued);
+3. zero 4K~12K;
+4. write 0~4K `C` (the AU is released and reused as a deferred target);
+5. write 8K~4K `D` (direct write into the unused part);
+6. remount and read 0~12K.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
+V1: `[ OK ]`. V2:
 ```
-_defer_or_allocate released=0x4000 need=0x4000 deferred
-_deferred_submit_unlock seq 1 0x436000~1000 crc 9042a7fd      <- old 'B'
-_deferred_submit_unlock seq 2 0x434000~1000 crc 4aa38d0b
-_verify_csum bad crc32c/0x1000 checksum at blob offset 0x2000, got 0x9042a7fd, expected 0x45dcb42b
-V1: [ OK ]   V2: read returns -5 (EIO)
+_verify_csum bad crc32c/0x1000 checksum at blob offset 0x2000, got 0x9042a7fd, expected 0x45dcb42b, device location [0x436000~1000], logical extent 0x2000~1000, object #-1:d3a31c15:::RaceObj:head#
+store_test.cc:12427: Failure
+Expected equality of these values:
+  12288
+  r
+    Which is: -5
 ```
+`0x9042a7fd` is the crc of the step-2 data `B`; the debug log shows the reuse
+(`_defer_or_allocate released=0x4000 need=0x4000 deferred`) and the stale deferred
+write (`_deferred_submit_unlock seq 1 0x436000~1000`).
 
 ## Expected
-Read returns `C | zeros | D`.
+The read returns `C | zeros | D`, as with the v1 write path.
 
 ## Suggested fix
-Do not reuse txn-released space when older deferred IO may target it (mirror v1:
-release to allocator after the osr's preceding deferred writes complete), or force
-subsequent writes into such blobs to be deferred / wait for deferred drain.
+Do not reuse space released in the current txn while older deferred IO on the
+sequencer may still target it (mirror v1: release to the allocator only after
+preceding deferred writes complete), or make later writes into such blobs deferred
+as well.

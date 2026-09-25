@@ -1,0 +1,46 @@
+Project: bluestore | Tracker: Bug | Severity: 3 - minor | Regression: 0
+Subject: BlueStore: _remove_collection dereferences the CollectionRef before its own ENOENT check
+
+|Kind|SIGSEGV instead of a clean error (ObjectStore API misuse)|
+|Severity|minor|
+|Config|default|
+|Affected|main. Reproduced on origin/main 8e6a13e7a9a|
+
+h3. Summary
+
+<pre>
+int BlueStore::_remove_collection(TransContext *txc, const coll_t &cid, CollectionRef *c)
+  ...
+  (*c)-&gt;flush_all_but_last();            // BlueStore.cc:19130, dereference first
+  {
+    std::unique_lock l(coll_lock);
+    if (!*c) { r = -ENOENT; goto out; }  // the check comes too late
+</pre>
+@OP_RMCOLL@ (16288) for a collection that does not exist segfaults instead of returning
+-ENOENT. With the default config the OSD aborts either way, because -ENOENT from
+OP_RMCOLL ends in @ceph_abort_msg("unexpected error")@ (16363-16370); the fix matters for
+diagnosability (transaction dump instead of a bare SIGSEGV) and for
+@objectstore_debug_throw_on_failed_txc=true@ (level dev).
+
+h3. Reproduction
+
+gtest @StoreTest.RemoveMissingCollectionENOENT@ (@test.cc@; sets
+@objectstore_debug_throw_on_failed_txc=true@ and expects -ENOENT).
+
+h3. Observed (origin/main 8e6a13e7a9a)
+
+<pre>
+*** Caught signal (Segmentation fault) **
+ 2: (BlueStore::Collection::flush_all_but_last()+0x16)
+ 3: (BlueStore::_remove_collection(BlueStore::TransContext*, coll_t const&, boost::intrusive_ptr&lt;BlueStore::Collection&gt;*)+0x56)
+ 4: (BlueStore::_txc_add_transaction(BlueStore::TransContext*, ceph::os::Transaction*)+0x2b5)
+</pre>
+
+h3. Suggested fix
+
+Move the @if (!*c)@ check before @(*c)->flush_all_but_last()@.
+
+h3. Reproducer files
+
+* "test.cc":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/19-remove-missing-collection-segfault/test.cc
+* Test patch for all gtests: "bluestore-bughunt-tests.patch":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch

@@ -1,0 +1,18 @@
+{
+ "issue": {
+  "project_id": "bluestore",
+  "tracker_id": 1,
+  "subject": "bluestore_max_alloc_size and 9 other declared options have no consumer (incl. bluestore_qfsck_on_mount=true)",
+  "description": "|Kind|cleanup / configuration silently ignored|\n|Severity|minor|\n|Config|any|\n|Affected|main. Reproduced on origin/main 8e6a13e7a9a|\n\nh3. Summary\n\nThese options are declared in global.yaml.in, but nothing outside @options/@ and\n@test/@ reads them (@grep -rw@ over src):\n\n* @bluestore_max_alloc_size@ (advanced, default 0, \"Maximum size of a single allocation (0 for no max)\"). @_set_alloc_sizes()@ (BlueStore.cc:7231) copies it into @max_alloc_size@, which is only logged (7255). No @allocate()@ call has used it since e200f358499 (2017). It is still a tracked key (5883) with a runtime handler (5966), although the yaml marks it @create@. store_test's @main()@ sets @bluestore_max_alloc_size=196608@ for the whole suite, expecting an effect.\n* @bluestore_qfsck_on_mount@ (dev, default *true*, \"Run quick-fsck at mount ...\"): added in 9b2a64a5f6e \"to force scan on mount for all tests\", but that commit contains no reader, so no check runs at mount.\n* No consumer either: @bluestore_bluefs_max_free@ (advanced), @bluestore_cleaner_sleep_interval@ (advanced), @bluestore_cache_trim_max_skip_pinned@, @bluestore_bitmapallocator_blocks_per_zone@, @bluestore_bitmapallocator_span_size@, @bluestore_debug_prefragment_max@, @bluestore_debug_freelist@ (all dev).\n* Outside BlueStore, same situation: @bdev_nvme_unbind_from_kernel@ (advanced).\n\nh3. Reproduction\n\n* gtest @StoreTestSpecificAUSize.MaxAllocSizeIgnored@ (@test.cc@, needs @#include <regex>@, included in the patch): @bluestore_max_alloc_size=64K@, @bluestore_max_blob_size=1M@, write 1 MiB, inspect the pextents.\n* @check-unused-options.sh@: static check (@SRC=<ceph checkout>@) listing options with no consumer.\n\nh3. Observed (origin/main 8e6a13e7a9a)\n\n<pre>\npextents 1 largest 0x100000\nstore_test.cc:13322: Failure\nExpected: (max_seen) &lt;= (cap), actual: 1048576 vs 65536\nbluestore_max_alloc_size=64K ignored: physical extent of 0x100000\n</pre>\n\nh3. Suggested fix\n\nHonor @bluestore_max_alloc_size@ in the allocation paths (v1 @_do_alloc_write@, v2\n@Writer::_defer_or_allocate@) or deprecate and remove it; wire up or remove\n@bluestore_qfsck_on_mount@; remove the other dead options.\n\nh3. Reproducer files\n\n* \"check-unused-options.sh\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/24-dead-options-max-alloc-size-ignored/check-unused-options.sh\n* \"test.cc\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/24-dead-options-max-alloc-size-ignored/test.cc\n* Test patch for all gtests: \"bluestore-bughunt-tests.patch\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch\n",
+  "custom_fields": [
+   {
+    "id": 4,
+    "value": "3 - minor"
+   },
+   {
+    "id": 13,
+    "value": "0"
+   }
+  ]
+ }
+}

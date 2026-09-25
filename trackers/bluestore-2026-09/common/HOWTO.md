@@ -39,3 +39,22 @@ BIN=<build>/bin WORK=/tmp/bh COMMON=/path/to/common/common.sh bash repro.sh
 ```
 `common.sh` provides `mkosd <dir> <size> [ceph-osd --mkfs args]`, which creates a
 standalone OSD (no monitor needed) with its block file at `<dir>.img`.
+
+## Filing on tracker.ceph.com
+tracker.ceph.com is Redmine; BlueStore bugs go to project **bluestore** (id 38),
+tracker **Bug**. Descriptions use **Textile** (`<pre>` blocks, `@code@`), not Markdown.
+Fields used by maintainers on recent BlueStore bugs: Severity (custom field 4:
+"2 - major" / "3 - minor"), Regression (13: 0/1), Backport (2, set by maintainers),
+Affected Versions (9), Pull request ID (21, set when a fix is posted).
+
+1. Generate the drafts (Subject + Textile body + API payload):
+   `python3 common/to-tracker.py NN-*/` -> `NN-*/tracker.textile`, `NN-*/tracker.json`.
+2. Either paste `tracker.textile` into https://tracker.ceph.com/projects/bluestore/issues/new
+   (Subject = first line, Severity/Regression from the header line), or use the API:
+   ```
+   REDMINE_API_KEY=<key from /my/account> bash common/file-tracker.sh NN-slug/          # dry run
+   REDMINE_API_KEY=<key>                  bash common/file-tracker.sh NN-slug/ --post   # file it
+   ```
+   The new issue URL is saved in `NN-slug/TRACKER`; the script refuses to file a record twice.
+3. When a fix PR is posted, put its number in "Pull request ID" and add
+   `Fixes: https://tracker.ceph.com/issues/<id>` to the commit message.

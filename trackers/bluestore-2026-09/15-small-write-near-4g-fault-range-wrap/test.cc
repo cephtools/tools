@@ -1,4 +1,3 @@
-// ===== candidate: v1-small-write-fault-range-4g-wrap
 // Add to src/test/objectstore/store_test.cc
 //
 // v1 write path: _do_write_small() faults [offset - max_bsize, offset + max_bsize)

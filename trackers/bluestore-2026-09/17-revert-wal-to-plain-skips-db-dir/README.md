@@ -1,34 +1,47 @@
-# BlueFS::revert_wal_to_plain() only looks at db.wal/: envelope WALs in db/ are left as-is, or it aborts
+# BlueFS revert_wal_to_plain ignores envelope WAL files in db/ (no db.wal dir); tool reports success
 
 | | |
 |---|---|
-| Component | bluefs / ceph-bluestore-tool (revert-wal-to-plain, downgrade-wal-to-v1) |
-| Kind | downgrade tool silently ineffective / abort; on-disk format |
-| Severity | major for downgrades of OSDs that keep the WAL in db/ |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Component | bluefs / ceph-bluestore-tool (`revert-wal-to-plain`) |
+| Kind | downgrade tool silently ineffective (on-disk format left as v2) |
+| Severity | minor (downgrade of OSDs created before Nautilus only) |
+| Config | default `bluefs_wal_envelope_mode=true` (v20+); OSDs created before Nautilus (v14.1.0, commit 57abe887683), which have no `db.wal` directory and keep the RocksDB WAL in `db/` |
+| Affected | main (envelope mode, v20+). Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
-`revert_wal_to_plain()` (BlueFS.cc:2460-2490) hard-codes `"db.wal"`. RocksDB WAL
-files live in `db/` for OSDs without a separate WAL dir (e.g. created before
-57abe887683). Then:
-- no `db.wal` dir: returns 0 ("No files needed to move"), leaving v2/envelope WALs
-  in `db/` -> an older Ceph cannot read them after the "successful" revert;
-- `db.wal` exists: after conversion `_compact_log_sync_LNF_LD()` keeps
-  `log.uses_envelope_mode` (set at mount if any file is envelope, BlueFS.cc:1170-1174;
-  compaction resets it only when all files are plain, BlueFS.cc:3128-3134) ->
-  `FAILED ceph_assert(!log.uses_envelope_mode)` (2484).
+`BlueFS::revert_wal_to_plain()` (BlueFS.cc:2460-2490) only looks at `"db.wal"`. OSDs
+created since Nautilus get `db.wal/` at mkfs (BlueStore.cc:8268), but older OSDs keep the
+WAL files in `db/`. On such an OSD it returns 0 ("No files needed to move") and leaves the
+envelope (v2) WAL files unconverted, so the tool reports success. An older release
+without envelope support may then fail to mount BlueFS or replay the WAL (not tested).
+`BlueStore::revert_wal_to_plain()` (BlueStore.cc:11168-11178) also ignores BlueFS's return value.
+
+The same root cause makes the function abort when `db.wal` exists and an envelope file is
+elsewhere: after converting `db.wal/`, `_compact_log_sync_LNF_LD()` keeps
+`log.uses_envelope_mode` set (set at mount if any file is envelope, BlueFS.cc:1170-1174;
+cleared by compaction only when all files are plain, 3128-3134), and
+`ceph_assert(!log.uses_envelope_mode)` (2484) fires. A real OSD does not have envelope
+logs in both directories; this variant only shows that files outside `db.wal` are not handled.
+
+The `bluefs_wal_envelope_mode` description mentions a `downgrade-wal-to-v1` command that
+does not exist; the tool command is `revert-wal-to-plain`.
 
 ## Reproduction
-`test.cc` -> `BlueFS_wal.bughunt_revert_wal_to_plain_skips_db_dir` and
-`..._asserts_with_db_wal` (append to `src/test/objectstore/test_bluefs.cc`).
+gtests (`test.cc`, in `src/test/objectstore/test_bluefs.cc`):
+`BlueFS_wal.bughunt_revert_wal_to_plain_skips_db_dir` and
+`BlueFS_wal.bughunt_revert_wal_to_plain_asserts_with_db_wal`.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
-still_envelope Actual: true  "revert_wal_to_plain left an envelope-mode WAL in 'db' untouched"
-BlueFS.cc: 2484: FAILED ceph_assert(!log.uses_envelope_mode)
+test_bluefs.cc:3257: Failure
+Value of: still_envelope
+  Actual: true
+Expected: false
+revert_wal_to_plain left an envelope-mode WAL in 'db' untouched
+
+src/os/bluestore/BlueFS.cc: 2484: FAILED ceph_assert(!log.uses_envelope_mode)
 ```
 
 ## Suggested fix
-Iterate over all directories (or all envelope-mode files in `nodes.file_map`),
-not only `db.wal`.
+Convert every envelope-mode file in `nodes.file_map` (or iterate over all directories),
+not only `db.wal`; propagate the error from `BlueStore::revert_wal_to_plain()`.

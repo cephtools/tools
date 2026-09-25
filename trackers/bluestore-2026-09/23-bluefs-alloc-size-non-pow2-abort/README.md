@@ -1,30 +1,41 @@
-# Non power-of-2 bluefs_alloc_size / bluefs_shared_alloc_size accepted, then abort in allocator
+# bluefs_alloc_size / bluefs_shared_alloc_size that are not a power of 2 are accepted, then abort in the allocator
 
 | | |
 |---|---|
 | Component | bluefs, configuration |
-| Kind | crash at mkfs / every OSD start after a config change |
+| Kind | crash at mkfs instead of a validation error |
 | Severity | minor |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Config | `bluefs_shared_alloc_size` (single device) or `bluefs_alloc_size` (dedicated DB/WAL) set to a non-power-of-2 value; both options are level advanced (defaults 64K and 1M) |
+| Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
-`BlueFS::_init_alloc()` (BlueFS.cc:821-858) only checks that
-`bluefs_shared_alloc_size` is a multiple of `min_alloc_size` and that
-`bluefs_alloc_size` is non-zero. The first BlueFS allocation then passes the unit
-to the allocator: `HybridAllocator_impl.h:27 FAILED ceph_assert(std::has_single_bit(unit))`.
-The only power-of-2 check is in the admin-socket "bluefs device info" command.
+`BlueFS::_init_alloc()` (BlueFS.cc:823-915) only asserts that
+`bluefs_shared_alloc_size` is a multiple of `min_alloc_size`
+(`ceph_assert(0 == p2phase(shared_alloc_size, unit))`, 841) and that `bluefs_alloc_size`
+is non-zero (`ceph_assert(alloc_size[id])`, 873). The first BlueFS allocation then passes
+the unit to the allocator, which aborts with
+`ceph_assert(std::has_single_bit(unit))` (HybridAllocator_impl.h:27). The only
+power-of-2 check is in the admin-socket "bluefs device info" command (BlueFS.cc:141).
+
+By reading (not reproduced): on an existing OSD, the crash happens at the first BlueFS
+allocation after the option is changed.
 
 ## Reproduction
-`repro.sh`: mkfs single device with `--bluefs-shared-alloc-size=96K`; with a dedicated
-DB and `--bluefs-alloc-size=1536K`; control with defaults.
+`repro.sh`: mkfs a single-device OSD with `--bluefs-shared-alloc-size=96K`; mkfs with a
+dedicated DB and `--bluefs-alloc-size=1536K`; control with defaults.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
-[control]   mkfs+fsck ok
-[shared96K] mkfs CRASHED: HybridAllocator_impl.h: 27: FAILED ceph_assert(std::has_single_bit(unit))
-[db1536K]   mkfs CRASHED: HybridAllocator_impl.h: 27: FAILED ceph_assert(std::has_single_bit(unit))
+== control (defaults)
+  [control] mkfs+fsck ok
+== single device, bluefs_shared_alloc_size=96K (multiple of 4K min_alloc, not pow2)
+  [shared96K] mkfs CRASHED:
+    src/os/bluestore/HybridAllocator_impl.h: 27: FAILED ceph_assert(std::has_single_bit(unit))
+== dedicated DB, bluefs_alloc_size=1536K
+  [db1536K] mkfs CRASHED:
+    src/os/bluestore/HybridAllocator_impl.h: 27: FAILED ceph_assert(std::has_single_bit(unit))
 ```
 
 ## Suggested fix
-Validate both options (power of 2, >= min_alloc_size) in `_init_alloc`/mkfs and fail with -EINVAL.
+Validate both options in `_init_alloc()` / mkfs (power of 2, >= min_alloc_size) and fail
+with -EINVAL.

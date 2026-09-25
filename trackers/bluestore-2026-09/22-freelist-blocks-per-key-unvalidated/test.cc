@@ -1,5 +1,3 @@
-// ===== candidate: freelist-blocks-per-key-unvalidated
-// ===== candidate: freelist-blocks-per-key-unvalidated
 // Add to src/test/objectstore/store_test.cc
 //
 // bluestore_freelist_blocks_per_key is persisted at mkfs with no validation.

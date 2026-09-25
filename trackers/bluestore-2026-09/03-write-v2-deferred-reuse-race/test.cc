@@ -1,4 +1,4 @@
-// Candidate B16: write_v2 may reuse space released in the same txn as a
+// write_v2 may reuse space released in the same txn as a
 // *deferred* target and mark the rest of the AU "unused"; a later small write
 // into that unused part is issued as direct I/O and can be overwritten by an
 // older, still-queued deferred write to the same disk bytes.

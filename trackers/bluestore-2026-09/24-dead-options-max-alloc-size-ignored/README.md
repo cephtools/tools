@@ -1,37 +1,47 @@
-# bluestore_max_alloc_size (and other documented BlueStore options, incl. bluestore_qfsck_on_mount=true) are silently ignored
+# bluestore_max_alloc_size and 9 other declared options have no consumer (incl. bluestore_qfsck_on_mount=true)
 
 | | |
 |---|---|
 | Component | bluestore, configuration |
-| Kind | configuration ignored |
+| Kind | cleanup / configuration silently ignored |
 | Severity | minor |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Config | any |
+| Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
-- `bluestore_max_alloc_size` ("Maximum size of a single allocation"): `_set_alloc_sizes()`
-  (BlueStore.cc:7231) copies it into `max_alloc_size`, which is only logged; no
-  `allocate()` call uses it since e200f358499 (2017). It is also listed in
-  `get_tracked_keys()` and handled at runtime although the yaml flags it `create`.
-- `bluestore_qfsck_on_mount` (default **true**, "Run quick-fsck at mount ...") was added
-  in 9b2a64a5f6e but never wired up: no code reads it.
-- Also unused: `bluestore_bluefs_max_free`, `bluestore_cleaner_sleep_interval`,
-  `bluestore_cache_trim_max_skip_pinned`, `bluestore_bitmapallocator_blocks_per_zone`,
-  `bluestore_bitmapallocator_span_size`, `bluestore_debug_prefragment_max`,
-  `bluestore_debug_freelist`, `bdev_nvme_unbind_from_kernel`.
+These options are declared in global.yaml.in, but nothing outside `options/` and
+`test/` reads them (`grep -rw` over src):
+
+- `bluestore_max_alloc_size` (advanced, default 0, "Maximum size of a single
+  allocation (0 for no max)"). `_set_alloc_sizes()` (BlueStore.cc:7231) copies it into
+  `max_alloc_size`, which is only logged (7255). No `allocate()` call has used it since
+  e200f358499 (2017). It is still a tracked key (5883) with a runtime handler (5966),
+  although the yaml marks it `create`. store_test's `main()` sets
+  `bluestore_max_alloc_size=196608` for the whole suite, expecting an effect.
+- `bluestore_qfsck_on_mount` (dev, default **true**, "Run quick-fsck at mount ..."):
+  added in 9b2a64a5f6e "to force scan on mount for all tests", but that commit contains no
+  reader, so no check runs at mount.
+- No consumer either: `bluestore_bluefs_max_free` (advanced),
+  `bluestore_cleaner_sleep_interval` (advanced), `bluestore_cache_trim_max_skip_pinned`,
+  `bluestore_bitmapallocator_blocks_per_zone`, `bluestore_bitmapallocator_span_size`,
+  `bluestore_debug_prefragment_max`, `bluestore_debug_freelist` (all dev).
+- Outside BlueStore, same situation: `bdev_nvme_unbind_from_kernel` (advanced).
 
 ## Reproduction
-- `test.cc` -> `StoreTestSpecificAUSize.MaxAllocSizeIgnored` (needs `#include <regex>`):
-  `bluestore_max_alloc_size=64K`, `bluestore_max_blob_size=1M`, write 1 MiB, inspect pextents.
+- gtest `StoreTestSpecificAUSize.MaxAllocSizeIgnored` (`test.cc`, needs `#include <regex>`,
+  included in the patch): `bluestore_max_alloc_size=64K`, `bluestore_max_blob_size=1M`,
+  write 1 MiB, inspect the pextents.
 - `check-unused-options.sh`: static check (`SRC=<ceph checkout>`) listing options with no consumer.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
-bluestore_max_alloc_size=64K ignored: physical extent of 0x100000
 pextents 1 largest 0x100000
+store_test.cc:13322: Failure
+Expected: (max_seen) <= (cap), actual: 1048576 vs 65536
+bluestore_max_alloc_size=64K ignored: physical extent of 0x100000
 ```
 
 ## Suggested fix
-Either honor `bluestore_max_alloc_size` in the allocate paths (v1 `_do_alloc_write`,
-v2 `Writer::_defer_or_allocate`) or remove/deprecate it; implement or remove
-`bluestore_qfsck_on_mount`; drop the other dead options.
+Honor `bluestore_max_alloc_size` in the allocation paths (v1 `_do_alloc_write`, v2
+`Writer::_defer_or_allocate`) or deprecate and remove it; wire up or remove
+`bluestore_qfsck_on_mount`; remove the other dead options.

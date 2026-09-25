@@ -1,31 +1,38 @@
-# v1 small write near 4 GiB: uint32 wrap in ExtentMap::fault_range() -> FAILED ceph_assert(last >= start)
+# BlueStore: small write near 4 GiB wraps uint32 in ExtentMap::fault_range() -> FAILED ceph_assert(last >= start)
 
 | | |
 |---|---|
 | Component | bluestore |
-| Kind | crash (OSD abort, crash loop on replay) |
-| Severity | minor (needs osd_max_object_size raised near 4 GiB; _do_gc variant > 2 GiB with compression) |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Kind | crash (ceph_assert); may recur if the client resends the op |
+| Severity | minor |
+| Config | needs `osd_max_object_size` raised to nearly 4 GiB (BlueStore allows up to OBJECT_MAX_SIZE, BlueStore.cc:8720) and a sharded extent map; default write path (v1) |
+| Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
 `ExtentMap::fault_range(db, uint32_t offset, uint32_t length)` (BlueStore.cc:4335-4349)
-computes `seek_shard(offset + length)` in uint32. `_do_write_small()` (16735-16742)
-faults `[offset - max_bsize, offset + max_bsize)`, so for offset > 2^32 - max_bsize the
-end wraps and `maybe_load_shard` asserts `last >= start` (4356). `_do_gc()` (18005)
-also passes an end as the length (`fault_range(db, *dirty_start, *dirty_end)`),
-wrapping once start+end >= 2^32. `_write()` only guarantees offset+length < OBJECT_MAX_SIZE.
+computes `seek_shard(offset + length)` in uint32. `_do_write_small()` (16734-16742) faults
+`[offset - max_bsize, offset + max_bsize)`, so for `offset > 2^32 - max_bsize` the end
+wraps and `maybe_load_shard()` hits `ceph_assert(last >= start)` (4356). `_write()` only
+guarantees `offset + length < OBJECT_MAX_SIZE`. The assert fires inside `_do_write`,
+before the KV commit.
+
+By code inspection (not reproduced): `_do_gc()` (18005) passes an end offset as the length
+(`fault_range(db, *dirty_start, *dirty_end)`), which wraps once start + end >= 2^32,
+i.e. GC of compressed extents above ~2 GiB.
 
 ## Reproduction
-`test.cc` -> `StoreTestSpecificAUSize.SmallWriteNear4GiBShardedOnode`: object with a
-sharded extent map (600 x 4K extents), write 0x800 bytes at 0xffffe000.
+gtest `StoreTestSpecificAUSize.SmallWriteNear4GiBShardedOnode` (`test.cc`): build an
+object with a sharded extent map (600 x 4K extents), then write 0x800 bytes at 0xffffe000.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
-BlueStore.cc: 4356: FAILED ceph_assert(last >= start)
- ... BlueStore::_do_write_small(...) <- _do_write_data <- _do_write
+src/os/bluestore/BlueStore.cc: 4356: FAILED ceph_assert(last >= start)
+*** Caught signal (Aborted) **
+ 2: (BlueStore::_do_write_small(BlueStore::TransContext*, ...)
+ 3: (BlueStore::_do_write_data(BlueStore::TransContext*, ...)
+ 4: (BlueStore::_do_write(BlueStore::TransContext*, ...)
 ```
 
 ## Suggested fix
-64-bit range math clamped to OBJECT_MAX_SIZE in fault_range/fault_range_ex; pass a
-length (end - start) in `_do_gc`.
+Do the range arithmetic in 64 bit and clamp to OBJECT_MAX_SIZE in
+`fault_range()` / `fault_range_ex()`; pass a length (end - start) in `_do_gc()`.

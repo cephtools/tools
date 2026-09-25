@@ -1,4 +1,3 @@
-// ===== candidate: pool-compression-alg-none-ignored
 // Add to src/test/objectstore/store_test.cc
 //
 // Pool option compression_algorithm=none must disable compression for that

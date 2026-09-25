@@ -1,4 +1,3 @@
-// ===== candidate: clone-range-dup-writing-offset
 // Add to src/test/objectstore/store_test.cc
 //
 // clone_range(src, dst, srcoff, len, dstoff) with srcoff != dstoff while the

@@ -1,4 +1,3 @@
-// ===== candidate: sb-repair-first-pextent-only
 // Add to src/test/objectstore/store_test.cc (after BluestoreRepairSharedBlobTest)
 //
 // _fsck_repair_shared_blobs() rebuilds the ref_map of a broken shared blob by

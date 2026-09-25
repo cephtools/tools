@@ -1,4 +1,4 @@
-// BUG (config): bluestore_max_blob_size{,_hdd,_ssd} accept 0 ("no limit" per the
+// bluestore_max_blob_size{,_hdd,_ssd} accept 0 ("no limit" per the
 // option doc), but with bluestore_write_v2=true Writer::_split_data() divides by
 // wctx->target_blob_size, which is 0 -> SIGFPE on the first uncompressed write.
 TEST_P(StoreTestSpecificAUSize, ZeroMaxBlobSizeWriteV2) {

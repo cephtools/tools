@@ -1,0 +1,62 @@
+Project: bluestore | Tracker: Bug | Severity: 2 - major | Regression: 0
+Subject: BlueStore write_v2: reusing a same-txn released AU lets a stale deferred write overwrite a later direct write
+
+|Kind|data corruption (detected as csum EIO; silent with @bluestore_csum_type=none@)|
+|Severity|major for affected configs|
+|Config|non-default: @bluestore_write_v2=true@ (default false; needed for recompression), @min_alloc_size > block_size@ (defaults are 4K for HDD and SSD, so legacy 16K/64K OSDs or explicit setting), @prefer_deferred_size > 0@ (HDD default 64K; SSD default 0, so SSD is not affected). The repro widens the window with @bluestore_deferred_batch_ops=1000@ and @bluestore_max_defer_interval=1000@|
+|Affected|main (write_v2 since PR #54504). Reproduced on origin/main 8e6a13e7a9a; the v1 write path passes the same test|
+
+h3. Summary
+
+@Writer::_defer_or_allocate()@ (Writer.cc:1312-1336) reuses space released *in the
+same transaction* (@released@) as the target of a deferred write, and the new blob
+marks the rest of the allocation unit unused (@add_unused_all()@, Writer.cc:512-514,
+only when @min_alloc_size != block_size@). A later small write into that unused part
+is issued as a direct aio write. An older deferred write to the same disk bytes, from
+an earlier txc and still in the deferred queue, is applied afterwards and overwrites
+the new data.
+
+v1 avoids this by releasing space to the allocator only after all preceding txcs on
+the sequencer have finished their deferred writes (@_txc_finish@, BlueStore.cc:15194-15200).
+
+h3. Reproduction
+
+gtests @StoreTestSpecificAUSize.DeferredReuseRaceV1@ (control) and @...V2@ (@test.cc@),
+min_alloc_size 16K:
+# write 16K @A@;
+# write 8K~4K @B@ (deferred overwrite, stays queued);
+# zero 4K~12K;
+# write 0~4K @C@ (the AU is released and reused as a deferred target);
+# write 8K~4K @D@ (direct write into the unused part);
+# remount and read 0~12K.
+
+h3. Observed (origin/main 8e6a13e7a9a)
+
+V1: @[ OK ]@. V2:
+<pre>
+_verify_csum bad crc32c/0x1000 checksum at blob offset 0x2000, got 0x9042a7fd, expected 0x45dcb42b, device location [0x436000~1000], logical extent 0x2000~1000, object #-1:d3a31c15:::RaceObj:head#
+store_test.cc:12427: Failure
+Expected equality of these values:
+  12288
+  r
+    Which is: -5
+</pre>
+@0x9042a7fd@ is the crc of the step-2 data @B@; the debug log shows the reuse
+(@_defer_or_allocate released=0x4000 need=0x4000 deferred@) and the stale deferred
+write (@_deferred_submit_unlock seq 1 0x436000~1000@).
+
+h3. Expected
+
+The read returns @C | zeros | D@, as with the v1 write path.
+
+h3. Suggested fix
+
+Do not reuse space released in the current txn while older deferred IO on the
+sequencer may still target it (mirror v1: release to the allocator only after
+preceding deferred writes complete), or make later writes into such blobs deferred
+as well.
+
+h3. Reproducer files
+
+* "test.cc":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/03-write-v2-deferred-reuse-race/test.cc
+* Test patch for all gtests: "bluestore-bughunt-tests.patch":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch

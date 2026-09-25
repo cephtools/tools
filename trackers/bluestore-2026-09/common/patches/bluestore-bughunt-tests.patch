@@ -68,7 +68,7 @@ index 4157d5bb22e..017dc9153f6 100755
 +  EXPECT_EQ(0u, dup) << "bytes allocated twice";
 +}
 diff --git a/src/test/objectstore/store_test.cc b/src/test/objectstore/store_test.cc
-index d1b8f55feb0..5760f67e8ba 100644
+index d1b8f55feb0..e6f52932170 100644
 --- a/src/test/objectstore/store_test.cc
 +++ b/src/test/objectstore/store_test.cc
 @@ -17,6 +17,7 @@
@@ -79,7 +79,7 @@ index d1b8f55feb0..5760f67e8ba 100644
  #include <string.h>
  #include <iostream>
  #include <memory>
-@@ -12272,6 +12273,1058 @@ TEST_P(UnsharingBlobsOnRemove, UnshareOnPartial) {
+@@ -12272,6 +12273,1046 @@ TEST_P(UnsharingBlobsOnRemove, UnshareOnPartial) {
    cleanup_store();
  }
  
@@ -164,7 +164,7 @@ index d1b8f55feb0..5760f67e8ba 100644
 +  ASSERT_EQ(0, mount());
 +}
 +
-+// BUG (config): bluestore_max_blob_size{,_hdd,_ssd} accept 0 ("no limit" per the
++// bluestore_max_blob_size{,_hdd,_ssd} accept 0 ("no limit" per the
 +// option doc), but with bluestore_write_v2=true Writer::_split_data() divides by
 +// wctx->target_blob_size, which is 0 -> SIGFPE on the first uncompressed write.
 +TEST_P(StoreTestSpecificAUSize, ZeroMaxBlobSizeWriteV2) {
@@ -199,7 +199,7 @@ index d1b8f55feb0..5760f67e8ba 100644
 +  ASSERT_TRUE(got.contents_equal(bl));
 +}
 +
-+// Candidate B16: write_v2 may reuse space released in the same txn as a
++// write_v2 may reuse space released in the same txn as a
 +// *deferred* target and mark the rest of the AU "unused"; a later small write
 +// into that unused part is issued as direct I/O and can be overwritten by an
 +// older, still-queued deferred write to the same disk bytes.
@@ -293,7 +293,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +}
 +
 +
-+// ===== candidate: clone-range-dup-writing-offset
 +// Add to src/test/objectstore/store_test.cc
 +//
 +// clone_range(src, dst, srcoff, len, dstoff) with srcoff != dstoff while the
@@ -371,7 +370,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +  }
 +}
 +
-+// ===== candidate: pool-compression-alg-none-ignored
 +// Add to src/test/objectstore/store_test.cc
 +//
 +// Pool option compression_algorithm=none must disable compression for that
@@ -427,7 +425,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +  EXPECT_EQ(0, b.data_compressed_original) << "pool compression_algorithm=none ignored";
 +}
 +
-+// ===== candidate: v1-small-write-fault-range-4g-wrap
 +// Add to src/test/objectstore/store_test.cc
 +//
 +// v1 write path: _do_write_small() faults [offset - max_bsize, offset + max_bsize)
@@ -503,7 +500,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +  }
 +}
 +
-+// ===== candidate: sb-repair-first-pextent-only
 +// Add to src/test/objectstore/store_test.cc (after BluestoreRepairSharedBlobTest)
 +//
 +// _fsck_repair_shared_blobs() rebuilds the ref_map of a broken shared blob by
@@ -603,7 +599,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +  bstore->mount();
 +}
 +
-+// ===== candidate: misref-repair-into-false-free
 +// Add to src/test/objectstore/store_test.cc (after BluestoreRepairTest)
 +//
 +// fsck repair fixes misreferenced extents (BlueStore.cc:~11560-11760) BEFORE it
@@ -693,7 +688,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +  bstore->mount();
 +}
 +
-+// ===== candidate: rmcoll-missing-nullderef
 +// Candidate: BlueStore::_remove_collection dereferences the CollectionRef
 +// ((*c)->flush_all_but_last()) BEFORE its own "if (!*c) return -ENOENT"
 +// check, so OP_RMCOLL on a collection that does not exist segfaults instead
@@ -736,7 +730,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +  }
 +}
 +
-+// ===== candidate: rename-perpg-omap-hash
 +// Candidate: _rename keeps the onode nid but per-pg omap keys embed the
 +// object's hash (Onode::calc_omap_key uses o->oid.hobj.get_bitwise_key_u32()).
 +// Renaming to an oid with a different hash orphans the omap.
@@ -798,7 +791,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +  }
 +}
 +
-+// ===== candidate: omap-rmrange-same-txn
 +// Candidate: omap range-delete ops (rmkeyrange / omap_clear / remove / clone)
 +// do not see omap keys written earlier in the SAME transaction.
 +// Paste inside #ifdef WITH_BLUESTORE near the end of store_test.cc
@@ -1006,8 +998,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +
 +
 +
-+// ===== candidate: freelist-blocks-per-key-unvalidated
-+// ===== candidate: freelist-blocks-per-key-unvalidated
 +// Add to src/test/objectstore/store_test.cc
 +//
 +// bluestore_freelist_blocks_per_key is persisted at mkfs with no validation.
@@ -1079,8 +1069,6 @@ index d1b8f55feb0..5760f67e8ba 100644
 +}
 +
 +
-+// ===== candidate: dead-bluestore-options
-+// ===== candidate: dead-bluestore-options
 +// Add to src/test/objectstore/store_test.cc (needs `#include <regex>` at top)
 +//
 +// bluestore_max_alloc_size ("Maximum size of a single allocation") is read
@@ -1139,15 +1127,14 @@ index d1b8f55feb0..5760f67e8ba 100644
  
  TEST_P(StoreTestSpecificAUSize, BluestoreEnforceHWSettingsHdd) {
 diff --git a/src/test/objectstore/test_bluefs.cc b/src/test/objectstore/test_bluefs.cc
-index 2be0b666ca8..d7f52fe05fe 100644
+index 2be0b666ca8..7d74bc5c9ad 100644
 --- a/src/test/objectstore/test_bluefs.cc
 +++ b/src/test/objectstore/test_bluefs.cc
-@@ -3128,6 +3128,208 @@ TEST(bluefs_locked_extents_t, basics) {
+@@ -3128,6 +3128,205 @@ TEST(bluefs_locked_extents_t, basics) {
    }
  }
  
 +
-+// ===== candidate: envmode-ino-reuse-stale-envelopes
 +// Append to src/test/objectstore/test_bluefs.cc (after the BlueFS_wal fixture).
 +//
 +// A WAL that gets a re-issued ino (after compaction + remount) shares the
@@ -1241,7 +1228,6 @@ index 2be0b666ca8..d7f52fe05fe 100644
 +}
 +
 +
-+// ===== candidate: revert-wal-plain-only-dbwal-dir
 +// Append to src/test/objectstore/test_bluefs.cc (after the BlueFS_wal fixture).
 +//
 +// revert_wal_to_plain() only looks at "db.wal"; envelope WALs in "db"
@@ -1306,7 +1292,6 @@ index 2be0b666ca8..d7f52fe05fe 100644
 +}
 +
 +
-+// ===== candidate: bluefs-invalidate-cache-range
 +// Append to src/test/objectstore/test_bluefs.cc
 +//
 +// BlueFS::invalidate_cache() forwards a block-aligned offset with an

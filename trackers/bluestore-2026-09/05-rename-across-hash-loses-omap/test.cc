@@ -1,4 +1,3 @@
-// ===== candidate: rename-perpg-omap-hash
 // Candidate: _rename keeps the onode nid but per-pg omap keys embed the
 // object's hash (Onode::calc_omap_key uses o->oid.hobj.get_bitwise_key_u32()).
 // Renaming to an oid with a different hash orphans the omap.

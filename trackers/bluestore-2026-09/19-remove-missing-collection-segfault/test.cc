@@ -1,4 +1,3 @@
-// ===== candidate: rmcoll-missing-nullderef
 // Candidate: BlueStore::_remove_collection dereferences the CollectionRef
 // ((*c)->flush_all_but_last()) BEFORE its own "if (!*c) return -ENOENT"
 // check, so OP_RMCOLL on a collection that does not exist segfaults instead

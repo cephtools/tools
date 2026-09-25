@@ -1,0 +1,18 @@
+{
+ "issue": {
+  "project_id": "bluestore",
+  "tracker_id": 1,
+  "subject": "BlueFS envelope mode: ino reuse after log compaction lets an unclosed WAL accept a deleted file's envelopes",
+  "description": "|Kind|BlueFS returns stale data of a deleted file after an unclean shutdown|\n|Severity|minor (no RocksDB-level reproduction yet)|\n|Config|default (@bluefs_wal_envelope_mode=true@)|\n|Affected|main (envelope mode, v20+). Reproduced on origin/main 8e6a13e7a9a|\n\nh3. Summary\n\n@_replay()@ resets @ino_last = 1@ (BlueFS.cc:1445), and the compacted log only records\nlive files (3084), so after log compaction and a remount, inode numbers of deleted\nfiles are handed out again. An envelope's stamp is @generate_stamp(uuid, ino)@\n(BlueFS.h:324); nothing else distinguishes file generations, and @_read_envelope@\nchecks only the stamp.\n\nPreconditions (all needed):\n# a WAL file is deleted and its ino is reused after compaction and remount;\n# the allocator gives the new file the old file's extent;\n# the new file is not closed cleanly (crash);\n# the new file's last envelope ends exactly where an old envelope starts (a partial block is zero-padded and stops the scan; the test uses 4080-byte payloads to get this).\n\nThen envelope scanning in @_envmode_index_file()@ (BlueFS.cc:2674-2721) accepts the old\nfile's leftover envelopes as content of the new file. BlueFS reports a larger size and\nreturns bytes of the deleted file.\n\nPossible consequence: RocksDB WAL recovery reads stale records. Not demonstrated: the\nstale bytes come from a different offset of the old WAL, so RocksDB record framing\nwould usually fail its CRC and treat them as a torn tail.\n\nh3. Reproduction\n\ngtest @BlueFS_wal.bughunt_envmode_ino_reuse_stale_envelopes@ (@test.cc@, in\n@src/test/objectstore/test_bluefs.cc@): write 8 blocks of @A@ to a WAL and delete it;\ncompact; remount; write 2 blocks of @B@ to a new WAL; drop the writer without close;\nremount; stat and read.\n\nh3. Observed (origin/main 8e6a13e7a9a)\n\n<pre>\nold ino 2 ext 1:0x100000~100000 / new ino 2 ext 1:0x100000~100000\nstat size 32640 read 32640 foreign('A') bytes 24480\ntest_bluefs.cc:3218: Failure\n  expected.size()\n    Which is: 8160\n    Which is: 32640\ntest_bluefs.cc:3220: Failure\n    Which is: 0\n    Which is: 24480\n</pre>\n\nh3. Expected\n\nThe new WAL's size is 8160 and it contains only @B@.\n\nh3. Suggested fix\n\nMake the stamp unique per file generation (e.g. mix in a persisted, monotonically\nincreasing file sequence), or persist @ino_last@ across compaction so inodes are not reused.\n\nh3. Reproducer files\n\n* \"test.cc\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/10-bluefs-envelope-ino-reuse-stale-data/test.cc\n* Test patch for all gtests: \"bluestore-bughunt-tests.patch\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch\n",
+  "custom_fields": [
+   {
+    "id": 4,
+    "value": "3 - minor"
+   },
+   {
+    "id": 13,
+    "value": "0"
+   }
+  ]
+ }
+}

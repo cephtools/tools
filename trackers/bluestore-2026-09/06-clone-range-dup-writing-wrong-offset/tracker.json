@@ -1,0 +1,18 @@
+{
+ "issue": {
+  "project_id": "bluestore",
+  "tracker_id": 1,
+  "subject": "BlueStore: clone_range with srcoff != dstoff copies the wrong in-flight \"writing\" buffers to the destination",
+  "description": "|Kind|wrong data returned from cache (on-disk data is correct); ObjectStore API contract violation|\n|Severity|minor|\n|Config|default; needs a buffered write (@FADVISE_WILLNEED@ or @bluestore_default_buffered_write=true@) whose @writing@ buffers are still present at clone time|\n|Affected|main, since 6213a94a838 (2022). Reproduced on origin/main 8e6a13e7a9a|\n\nh3. Summary\n\n@ExtentMap::dup()@ / @dup_esb()@ (BlueStore.cc:3270, 3399) call\n@oldo->bc._dup_writing(txc, newo->c, newo, dstoff, length)@.\n@BufferSpace::_dup_writing()@ (BlueStore.cc:1970-2021) uses that one offset both to\nlook up source buffers and to place destination buffers. With @srcoff != dstoff@ it\ninstalls source buffers from @[dstoff, dstoff+len)@ (unrelated data) into the\ndestination and misses the actually cloned range @[srcoff, srcoff+len)@.\n\nThe OSD always passes @srcoff == dstoff@ (ReplicatedBackend.cc:1901/1968,\nPGBackend.cc:869, ECTransaction.cc:957/1110; @PGTransaction::clone_range@ has no\ncallers), so this affects direct ObjectStore users only. The repro also modifies the\nsource in the same txn, which PGTransaction's ordering rules would not produce.\n\nh3. Reproduction\n\ngtest @StoreTest.CloneRangeShiftedWithWritingBuffers@ (@test.cc@): in one txn write the\nsource @[0,128K) = A|B@ with @FADVISE_WILLNEED@, then @clone_range(src, dst, 0, 64K, 64K)@;\nread the destination at @64K~64K@.\n\nh3. Observed (origin/main 8e6a13e7a9a)\n\n<pre>\nstore_test.cc:12535: Failure\nValue of: bl_eq(a, got)\n  Actual: false\nExpected: true\ndst[64K,128K) served stale/wrong data from cache\n</pre>\nThe read returns @B@ (expected @A@); after a remount the on-disk data is correct.\n\nh3. Suggested fix\n\nPass both @srcoff@ and @dstoff@ to @_dup_writing()@: scan the source at\n@[srcoff, srcoff+len)@ and place buffers at @b_off - srcoff + dstoff@.\n\nh3. Reproducer files\n\n* \"test.cc\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/06-clone-range-dup-writing-wrong-offset/test.cc\n* Test patch for all gtests: \"bluestore-bughunt-tests.patch\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch\n",
+  "custom_fields": [
+   {
+    "id": 4,
+    "value": "3 - minor"
+   },
+   {
+    "id": 13,
+    "value": "0"
+   }
+  ]
+ }
+}

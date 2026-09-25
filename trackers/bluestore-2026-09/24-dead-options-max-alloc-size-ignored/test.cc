@@ -1,5 +1,3 @@
-// ===== candidate: dead-bluestore-options
-// ===== candidate: dead-bluestore-options
 // Add to src/test/objectstore/store_test.cc (needs `#include <regex>` at top)
 //
 // bluestore_max_alloc_size ("Maximum size of a single allocation") is read

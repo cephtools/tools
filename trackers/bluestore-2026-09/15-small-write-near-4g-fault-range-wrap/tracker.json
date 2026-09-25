@@ -1,0 +1,18 @@
+{
+ "issue": {
+  "project_id": "bluestore",
+  "tracker_id": 1,
+  "subject": "BlueStore: small write near 4 GiB wraps uint32 in ExtentMap::fault_range() -> FAILED ceph_assert(last >= start)",
+  "description": "|Kind|crash (ceph_assert); may recur if the client resends the op|\n|Severity|minor|\n|Config|needs @osd_max_object_size@ raised to nearly 4 GiB (BlueStore allows up to OBJECT_MAX_SIZE, BlueStore.cc:8720) and a sharded extent map; default write path (v1)|\n|Affected|main. Reproduced on origin/main 8e6a13e7a9a|\n\nh3. Summary\n\n@ExtentMap::fault_range(db, uint32_t offset, uint32_t length)@ (BlueStore.cc:4335-4349)\ncomputes @seek_shard(offset + length)@ in uint32. @_do_write_small()@ (16734-16742) faults\n@[offset - max_bsize, offset + max_bsize)@, so for @offset > 2^32 - max_bsize@ the end\nwraps and @maybe_load_shard()@ hits @ceph_assert(last >= start)@ (4356). @_write()@ only\nguarantees @offset + length < OBJECT_MAX_SIZE@. The assert fires inside @_do_write@,\nbefore the KV commit.\n\nBy code inspection (not reproduced): @_do_gc()@ (18005) passes an end offset as the length\n(@fault_range(db, *dirty_start, *dirty_end)@), which wraps once start + end >= 2^32,\ni.e. GC of compressed extents above ~2 GiB.\n\nh3. Reproduction\n\ngtest @StoreTestSpecificAUSize.SmallWriteNear4GiBShardedOnode@ (@test.cc@): build an\nobject with a sharded extent map (600 x 4K extents), then write 0x800 bytes at 0xffffe000.\n\nh3. Observed (origin/main 8e6a13e7a9a)\n\n<pre>\nsrc/os/bluestore/BlueStore.cc: 4356: FAILED ceph_assert(last &gt;= start)\n*** Caught signal (Aborted) **\n 2: (BlueStore::_do_write_small(BlueStore::TransContext*, ...)\n 3: (BlueStore::_do_write_data(BlueStore::TransContext*, ...)\n 4: (BlueStore::_do_write(BlueStore::TransContext*, ...)\n</pre>\n\nh3. Suggested fix\n\nDo the range arithmetic in 64 bit and clamp to OBJECT_MAX_SIZE in\n@fault_range()@ / @fault_range_ex()@; pass a length (end - start) in @_do_gc()@.\n\nh3. Reproducer files\n\n* \"test.cc\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/15-small-write-near-4g-fault-range-wrap/test.cc\n* Test patch for all gtests: \"bluestore-bughunt-tests.patch\":https://github.com/cephtools/tools/tree/main/trackers/bluestore-2026-09/common/patches/bluestore-bughunt-tests.patch\n",
+  "custom_fields": [
+   {
+    "id": 4,
+    "value": "3 - minor"
+   },
+   {
+    "id": 13,
+    "value": "0"
+   }
+  ]
+ }
+}

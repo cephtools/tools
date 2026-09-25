@@ -1,33 +1,46 @@
-# ceph-bluestore-tool bluefs-import segfaults for *.log destinations (envelope mode) and for missing directories
+# ceph-bluestore-tool bluefs-import segfaults for *.log targets (envelope mode) and missing dirs
 
 | | |
 |---|---|
 | Component | ceph-bluestore-tool / bluefs |
 | Kind | tool crash |
 | Severity | minor |
-| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
-| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
+| Config | default (`bluefs_wal_envelope_mode=true`) |
+| Affected | main (envelope mode, v20+). Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
-`bluefs_import()` (src/os/bluestore/bluestore_tool.cc:274-290):
-- ignores the return value of `open_for_write()` -> missing dir: uninitialized `h` used -> SIGSEGV;
-- uses raw `h->append()` instead of `append_try_flush()`. With `bluefs_wal_envelope_mode=true`
-  (default) any `*.log` file is ENVELOPE; nothing sets `envelope_head_filler`, so
-  `fsync()` -> `_flush_F` -> `_flush_envelope_F` writes through a null filler -> SIGSEGV;
-- no intermediate flush: inputs >= 4 GiB hit `ceph_assert(l0+len <= UINT_MAX)`.
+`bluefs_import()` (src/os/bluestore/bluestore_tool.cc:251-294):
+- ignores the return value of `open_for_write()` (278); for a missing directory the
+  uninitialized `h` is then used -> SIGSEGV;
+- appends with raw `h->append()` (283-289) instead of `append_try_flush()`. With
+  envelope mode on (default), any `*.log` file is an ENVELOPE file. `envelope_head_filler`
+  is only set up in `append_try_flush()` (BlueFS.cc:4291), so `fsync()` -> `_flush_F()` ->
+  `_flush_envelope_F()` writes through an unset filler (BlueFS.cc:4103) -> SIGSEGV;
+- by reading (not reproduced): nothing flushes during the import, so an input of 4 GiB or
+  more would hit `ceph_assert(l0 + len <= std::numeric_limits<unsigned>::max())` in
+  `FileWriter::append()` (BlueFS.h:495).
 
 ## Reproduction
-`repro.sh`: import 100 KB to `db/bughunt.sst` (control), to `db.wal/999999.log`, and to `nosuchdir/x`.
+`repro.sh`: import a 100 KB file to `db/bughunt.sst` (control), to `db.wal/999999.log`
+(envelope), and to `nosuchdir/x`.
 
-## Observed (c28)
+## Observed (origin/main 8e6a13e7a9a)
 ```
-import to db/bughunt.sst               exit=0
-import to db.wal/999999.log            Segmentation fault, exit=139
-  2: (BlueFS::_flush_envelope_F(BlueFS::FileWriter*)+0xa7)
-  3: (BlueFS::_flush_F(BlueFS::FileWriter*, bool, bool*)+0x1a3)
-import to nosuchdir/x                  Segmentation fault, exit=139
+== import to db/bughunt.sst (non-envelope, control)
+exit=0
+== import to db.wal/999999.log (envelope mode)
+Segmentation fault      (core dumped) $BT bluefs-import ...
+exit=139 (139/134 = crash)
+== import to nosuchdir/x
+Segmentation fault      (core dumped) $BT bluefs-import ...
+exit=139 (expect clean error)
+```
+Backtrace of the envelope case (from the tool's log file):
+```
+ 2: (BlueFS::_flush_envelope_F(BlueFS::FileWriter*)+0xa7)
+ 3: (BlueFS::_flush_F(BlueFS::FileWriter*, bool, bool*)+0x1a3)
 ```
 
 ## Suggested fix
-Check `open_for_write()`; use `append_try_flush()`/periodic flush; open with
-envelope mode disabled (or set up the envelope filler) for imported files.
+Check the `open_for_write()` result; use `append_try_flush()` (or flush periodically);
+set up the envelope filler for envelope-mode files, or open imported files in plain mode.
