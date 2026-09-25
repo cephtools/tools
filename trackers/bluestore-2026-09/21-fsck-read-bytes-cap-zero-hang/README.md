@@ -6,6 +6,7 @@
 | Kind | hang (100% CPU) |
 | Severity | minor |
 | Config | `bluestore_fsck_read_bytes_cap=0` (level advanced, default 64M, runtime, no `min`) with a deep fsck: `ceph-bluestore-tool fsck/repair --deep`, or an OSD with `bluestore_fsck_on_mount=true` and `bluestore_fsck_on_mount_deep=true` (both dev, default false) |
+| Real-world | **Real tool**: `ceph-bluestore-tool fsck --deep` on an OSD created by `ceph-osd --mkfs` |
 | Affected | main, since ced308000ae (v14.1.0). Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary

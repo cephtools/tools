@@ -6,6 +6,7 @@
 | Kind | double-free accounting / allocator assert; possible double allocation |
 | Severity | major |
 | Config | default `bluestore_allocator=hybrid`, but only after the tree has spilled into the bitmap fallback (range count above `bluestore_hybrid_alloc_mem_cap`, i.e. a heavily fragmented OSD), plus an online expand (main only, PR #66344) |
+| Real-world | **Confirmed on a live OSD**: fragmented OSD + real online expand + rados writes -> OSD abort |
 | Affected | main; online expand path from PR #66344 (2026-06). Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
@@ -46,6 +47,23 @@ fastbmap_allocator_impl.h: 1014: FAILED ceph_assert(available >= allocated_here)
  1: (AllocatorLevel02<AllocatorLevel01Loose>::_allocate_l2(...)
  2: (BitmapAllocator::allocate(...)
  3: (HybridAllocatorBase<AvlAllocator>::allocate(...)
+```
+
+## Live OSD reproduction
+vstart 1 OSD, 1.1 GiB main device, `bluestore_hybrid_alloc_mem_cap=8192` (dev option, used only to reach bitmap spillover quickly, i.e. to simulate a heavily fragmented OSD); write 4000 x 64K objects and delete every other one; grow the file to 2 GiB (no label position crossed); `ceph tell osd.0 bluestore bluefs-bdev-expand`; fill with 4 MiB objects (`common/live-scenarios.sh 02`).
+```
+-- fragment: write 4000 x 64K, delete every other one
+hybrid::_spillover_range constructing fallback allocator
+-- grow 1.1G -> 2G (no label position crossed), online expand
+Expanding DB/WAL...
+2 : Expanding to 0x80000000(2 GiB)
+-- fill the device
+write stopped: [errno 110] RADOS timed out (Ioctx.write_full(p): failed to write g480)
+OSD DIED:
+src/os/bluestore/fastbmap_allocator_impl.h: 1014: FAILED ceph_assert(available >= allocated_here)
+*** Caught signal (Aborted) **
+src/os/bluestore/fastbmap_allocator_impl.h: 1014: FAILED ceph_assert(available >= allocated_here)
+fsck success
 ```
 
 ## Expected

@@ -4,4 +4,4 @@ Bug records ready to be filed on tracker.ceph.com. Each record has a README
 (summary, root cause with code references, observed output, suggested fix)
 and a reproducer (gtest `test.cc` or `repro.sh`) that was run and confirmed.
 
-- [bluestore-2026-09](bluestore-2026-09/) — 23 BlueStore/BlueFS bugs found by code review, reproduced on clean origin/main @ 8e6a13e7a9a.
+- [bluestore-2026-09](bluestore-2026-09/) — 18 BlueStore/BlueFS bugs that occur in real use (live OSD, real tools or repair paths), reproduced on clean origin/main @ 8e6a13e7a9a.

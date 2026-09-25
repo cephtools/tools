@@ -6,6 +6,7 @@
 | Kind | crash (ceph_assert); may recur if the client resends the op |
 | Severity | minor |
 | Config | needs `osd_max_object_size` raised to nearly 4 GiB (BlueStore allows up to OBJECT_MAX_SIZE, BlueStore.cc:8720) and a sharded extent map; default write path (v1) |
+| Real-world | **Confirmed on a live OSD**: `osd_max_object_size` raised, librados write at 0xffffe000 -> OSD abort |
 | Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
@@ -31,6 +32,16 @@ src/os/bluestore/BlueStore.cc: 4356: FAILED ceph_assert(last >= start)
  2: (BlueStore::_do_write_small(BlueStore::TransContext*, ...)
  3: (BlueStore::_do_write_data(BlueStore::TransContext*, ...)
  4: (BlueStore::_do_write(BlueStore::TransContext*, ...)
+```
+
+## Live OSD reproduction
+vstart 1 OSD with `osd_max_object_size = 4294967295`; librados: 600 x 4K writes at 1 MiB + i*8K (sharded extent map), then write 0x800 bytes at 0xffffe000 (`common/live-scenarios.sh 15`).
+```
+write near 4GiB failed: [errno 110] RADOS timed out (Ioctx.write(p): failed to write big)
+OSD DIED:
+src/os/bluestore/BlueStore.cc: 4356: FAILED ceph_assert(last >= start)
+*** Caught signal (Aborted) **
+src/os/bluestore/BlueStore.cc: 4356: FAILED ceph_assert(last >= start)
 ```
 
 ## Suggested fix

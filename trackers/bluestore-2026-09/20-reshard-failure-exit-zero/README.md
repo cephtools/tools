@@ -6,6 +6,7 @@
 | Kind | wrong exit status; scripts cannot detect the failure |
 | Severity | minor |
 | Config | any |
+| Real-world | **Real tool**: `ceph-bluestore-tool reshard` on an OSD created by `ceph-osd --mkfs` |
 | Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary

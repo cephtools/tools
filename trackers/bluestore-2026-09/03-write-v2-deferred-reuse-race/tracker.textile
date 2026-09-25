@@ -3,7 +3,8 @@ Subject: BlueStore write_v2: reusing a same-txn released AU lets a stale deferre
 
 |Kind|data corruption (detected as csum EIO; silent with @bluestore_csum_type=none@)|
 |Severity|major for affected configs|
-|Config|non-default: @bluestore_write_v2=true@ (default false; needed for recompression), @min_alloc_size > block_size@ (defaults are 4K for HDD and SSD, so legacy 16K/64K OSDs or explicit setting), @prefer_deferred_size > 0@ (HDD default 64K; SSD default 0, so SSD is not affected). The repro widens the window with @bluestore_deferred_batch_ops=1000@ and @bluestore_max_defer_interval=1000@|
+|Config|non-default: @bluestore_write_v2=true@ (default false; needed for recompression), @min_alloc_size > block_size@ (defaults are 4K for HDD and SSD, so legacy 16K/64K OSDs or explicit setting), @prefer_deferred_size > 0@ (HDD default 64K; SSD default 0, so SSD is not affected). The gtest widens the window with @bluestore_deferred_batch_ops=1000@ and @bluestore_max_defer_interval=1000@; the live-OSD reproduction uses the default deferred settings|
+|Real-world|*Confirmed on a live OSD* with plain librados write/zero ops (write_v2, 16K min_alloc HDD OSD): object unreadable after OSD restart|
 |Affected|main (write_v2 since PR #54504). Reproduced on origin/main 8e6a13e7a9a; the v1 write path passes the same test|
 
 h3. Summary
@@ -44,6 +45,21 @@ Expected equality of these values:
 @0x9042a7fd@ is the crc of the step-2 data @B@; the debug log shows the reuse
 (@_defer_or_allocate released=0x4000 need=0x4000 deferred@) and the stale deferred
 write (@_deferred_submit_unlock seq 1 0x436000~1000@).
+
+h3. Live OSD reproduction
+
+vstart 1 OSD (HDD-type file device) with @bluestore_write_v2=true@, @bluestore_min_alloc_size_hdd=16384@, other options default; librados: write_full 16K @A@, write 4K @B@ at 8K, zero 4K~12K, write 4K @C@ at 0, write 4K @D@ at 8K; restart the OSD; read (@common/live-scenarios.sh 03@).
+<pre>
+1 write_full A 16K
+2 write B at 8K (deferred overwrite)
+3 zero 4K~12K
+4 write C at 0 (AU released + reused)
+5 write D at 8K (into unused part)
+read before restart ok: True
+read after restart FAILED: [errno 110] RADOS timed out (Ioctx.read(p): failed to read race)
+bluestore(/root/bh/vs/dev/osd0) _verify_csum bad crc32c/0x1000 checksum at blob offset 0x2000, got 0x9042a7fd, expected 0x45dcb42b, device location [0x19062000~1000], logical extent 0x0~1000, object #
+bluestore(/root/bh/vs/dev/osd0) _verify_csum bad crc32c/0x1000 checksum at blob offset 0x2000, got 0x9042a7fd, expected 0x45dcb42b, device location [0x19062000~1000], logical extent 0x2000~1000, objec
+</pre>
 
 h3. Expected
 

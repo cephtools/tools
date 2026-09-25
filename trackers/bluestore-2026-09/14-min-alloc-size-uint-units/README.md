@@ -6,6 +6,7 @@
 | Kind | option type mismatch; mkfs fails loudly (no silent misconfiguration) |
 | Severity | minor |
 | Config | `bluestore_min_alloc_size` given with a unit suffix; workaround: use a plain number (65536) |
+| Real-world | **Real tools**: `ceph-conf` and `ceph-osd --mkfs` |
 | Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 | Related | tracker 72263 (feature request about multipliers for int/uint options) is not this bug |
 

@@ -1,0 +1,50 @@
+# common/live-scenarios.sh on origin/main 8e6a13e7a9a (+ test patch), c28, 2026-09-25
+
+######## scenario 02
+-- fragment: write 4000 x 64K, delete every other one
+hybrid::_spillover_range constructing fallback allocator
+-- grow 1.1G -> 2G (no label position crossed), online expand
+Expanding DB/WAL...
+2 : Expanding to 0x80000000(2 GiB)
+-- fill the device
+write stopped: [errno 110] RADOS timed out (Ioctx.write_full(p): failed to write g480)
+OSD DIED:
+src/os/bluestore/fastbmap_allocator_impl.h: 1014: FAILED ceph_assert(available >= allocated_here)
+*** Caught signal (Aborted) **
+src/os/bluestore/fastbmap_allocator_impl.h: 1014: FAILED ceph_assert(available >= allocated_here)
+fsck success
+
+######## scenario 03
+1 write_full A 16K
+2 write B at 8K (deferred overwrite)
+3 zero 4K~12K
+4 write C at 0 (AU released + reused)
+5 write D at 8K (into unused part)
+read before restart ok: True
+read after restart FAILED: [errno 110] RADOS timed out (Ioctx.read(p): failed to read race)
+bluestore(/root/bh/vs/dev/osd0) _verify_csum bad crc32c/0x1000 checksum at blob offset 0x2000, got 0x9042a7fd, expected 0x45dcb42b, device location [0x19062000~1000], logical extent 0x0~1000, object #
+bluestore(/root/bh/vs/dev/osd0) _verify_csum bad crc32c/0x1000 checksum at blob offset 0x2000, got 0x9042a7fd, expected 0x45dcb42b, device location [0x19062000~1000], logical extent 0x2000~1000, objec
+
+######## scenario 04
+omap keys after op: ['b', 'd'] (expected ['d'])
+
+######## scenario 12
+rados put rc=124
+OSD DIED:
+*** Caught signal (Floating point exception) **
+
+######## scenario 13
+set pool 3 compression_mode to force
+set pool 4 compression_mode to force
+set pool 3 compression_algorithm to lz4
+set pool 4 compression_algorithm to none
+set rc=0
+pool ctl  stored=16777216 compress_under_bytes=16777216 compress_bytes_used=1048576
+pool none stored=16777216 compress_under_bytes=16777216 compress_bytes_used=1048576
+
+######## scenario 15
+write near 4GiB failed: [errno 110] RADOS timed out (Ioctx.write(p): failed to write big)
+OSD DIED:
+src/os/bluestore/BlueStore.cc: 4356: FAILED ceph_assert(last >= start)
+*** Caught signal (Aborted) **
+src/os/bluestore/BlueStore.cc: 4356: FAILED ceph_assert(last >= start)

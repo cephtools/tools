@@ -4,6 +4,7 @@ Subject: bluestore_freelist_blocks_per_key is not validated: 0 -> SIGFPE, not mu
 |Kind|mkfs crash (0, not a multiple of 8) / runtime abort (non-power-of-2 multiple of 8); the value is persisted at mkfs|
 |Severity|minor|
 |Config|@bluestore_freelist_blocks_per_key@ (level dev, default 128) set to an invalid value at mkfs; only used with the bitmap freelist (rotational DB, i.e. default HDD OSDs, or @bluestore_allocation_from_file=false@)|
+|Real-world|*Real tools*: @ceph-osd --mkfs@ crashes (0, 4); the 96 case is shown at the ObjectStore level|
 |Affected|main. Reproduced on origin/main 8e6a13e7a9a|
 
 h3. Summary

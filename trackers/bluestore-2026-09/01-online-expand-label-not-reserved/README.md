@@ -6,6 +6,7 @@
 | Kind | data corruption / data loss (on-disk label and object data) |
 | Severity | major |
 | Config | default (`bluestore_bdev_label_multi=true`); needs an online expand (`ceph tell osd.N bluestore bluefs-bdev-expand`) that crosses a label position (1G/10G/100G/1000G) |
+| Real-world | **Confirmed on a live OSD** (vstart, real `ceph tell osd.0 bluestore bluefs-bdev-expand`, rados writes): object unfound, PG `recovery_unfound`, HEALTH_ERR |
 | Affected | main only: online expand was added by PR #66344 (merged 2026-06-30, a65fd3baf37); not in any release. Reproduced on origin/main 8e6a13e7a9a |
 | Related | tracker 69997 (label locations found occupied after offline expand in NCB mode; fixed by PR 61843 via the allocator update order). The offline path reserves labels when it re-opens the store; the online path does not |
 
@@ -57,6 +58,20 @@ fsck error: leaked extent 0x40000000~1000
   store->fsck(false)
     Which is: 3
 ```
+
+## Live OSD reproduction
+`live-osd-repro.sh`: vstart 1 OSD, 900 MiB main device; grow the file to 3 GiB and run `ceph tell osd.0 bluestore bluefs-bdev-expand`; write 350 x 4 MiB objects with `rados put`; grow to 3.5 GiB and expand again (rewrites the labels); read everything back. Full output in `live-osd-output.txt`:
+```
+offset 1G after expand: label present
+offset 1G after writes: no label (data:  cd b3 f2 a6 42 ca d0 d8 ...)
+offset 1G after 2nd expand: label present
+_verify_csum bad crc32c/0x1000 checksum at blob offset 0x7000, got 0x0, expected 0xfc98f725, device location [0x40000000~1000], logical extent 0x387000~1000, object #1:1cf1ad59:::obj156:head#
+log [ERR] : 1.18 missing primary copy of 1:1cf1ad59:::obj156:head, unfound
+HEALTH_ERR ... 1/352 objects unfound (0.284%); Possible data damage: 1 pg recovery_unfound
+fsck error: bdev label at 0x40000000 corrupted
+fsck error:  oid #1:1cf1ad59:::obj156:head#, extent 0x3fff9000~10000 or a subset is already allocated (misreferenced)
+```
+With a replicated pool the other copies would let the OSD recover the object; with size 1 (or if every copy is hit) the data is lost.
 
 ## Expected
 The label copy at 1G stays intact, every object reads back, fsck is clean.

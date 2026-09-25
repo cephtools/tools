@@ -6,6 +6,7 @@
 | Kind | crash at mkfs instead of a validation error |
 | Severity | minor |
 | Config | `bluefs_shared_alloc_size` (single device) or `bluefs_alloc_size` (dedicated DB/WAL) set to a non-power-of-2 value; both options are level advanced (defaults 64K and 1M) |
+| Real-world | **Real tool**: `ceph-osd --mkfs` crashes |
 | Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary

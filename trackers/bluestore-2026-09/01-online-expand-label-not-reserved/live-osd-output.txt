@@ -1,0 +1,33 @@
+# live-osd-repro.sh on origin/main 8e6a13e7a9a (+ test patch), vstart 1 OSD, HDD-type file device, 2026-09-25
+== start 1-OSD vstart cluster, main device 900 MiB
+block size: 943718400
+== grow backing file to 3 GiB, online expand
+2 : Expanding to 0xc0000000(3 GiB)
+2 : size updated to 0xc0000000(3 GiB)
+offset 1G after expand: label present
+== write 350 x 4 MiB random objects via rados
+offset 1G after writes: no label (data:  cd b3 f2 a6 42 ca d0 d8 c4 35 a4 db 66 58 63 f0)
+== grow to 3.5 GiB, second online expand (rewrites labels at all valid locations)
+2 : Expanding to 0xe0000000(3.5 GiB)
+2 : size updated to 0xe0000000(3.5 GiB)
+offset 1G after 2nd expand: label present
+== read back all objects
+(rados get obj156 blocked; killed after 54 min)
+
+# osd.0.log
+bluestore(/root/bh/vs/dev/osd0) _verify_csum bad crc32c/0x1000 checksum at blob offset 0x7000, got 0x0, expected 0xfc98f725, device location [0x40000000~1000], logical extent 0x387000~1000, object #1:1cf1ad59:::obj156:head#
+log_channel(cluster) log [ERR] : 1.18 missing primary copy of 1:1cf1ad59:::obj156:head, unfound
+osd.0 35 get_health_metrics reporting 1 slow ops, oldest is osd_op(client.5652.0:1 1.18 1:1cf1ad59:::obj156:head [read 0~4194304] ...)
+
+# ceph health detail
+HEALTH_ERR 1 OSD(s) experiencing slow operations in BlueStore; 1/352 objects unfound (0.284%); Possible data damage: 1 pg recovery_unfound; Degraded data redundancy: 1/352 objects degraded (0.284%), 1 pg degraded; ...
+[WRN] OBJECT_UNFOUND: 1/352 objects unfound (0.284%)
+    pg 1.18 has 1 unfound objects
+[ERR] PG_DAMAGED: Possible data damage: 1 pg recovery_unfound
+    pg 1.18 is active+recovery_unfound+degraded, acting [0], 1 unfound
+
+# ceph-bluestore-tool fsck after stopping the cluster
+fsck error: bdev label at 0x40000000 corrupted
+fsck error:  oid #1:1cf1ad59:::obj156:head#, extent 0x3fff9000~10000 or a subset is already allocated (misreferenced)
+fsck error: leaked extent 0x40000000~1000
+fsck status: remaining 3 error(s) and warning(s)

@@ -6,6 +6,7 @@
 | Kind | incomplete repair (shared-blob metadata left inconsistent) |
 | Severity | minor |
 | Config | default; any shared blob (clone/snapshot) with 2 or more valid pextents whose record repair rewrites |
+| Real-world | Real trigger path is `ceph-bluestore-tool repair` on a store with a damaged shared-blob record; the damage is injected with a BlueStore test hook, so it is demonstrated at the ObjectStore level |
 | Affected | main, introduced in a902d22b6c7 (2022). Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary

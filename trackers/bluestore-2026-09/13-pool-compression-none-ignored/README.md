@@ -6,6 +6,7 @@
 | Kind | per-pool setting ignored (regression) |
 | Severity | minor |
 | Config | pool `compression_algorithm=none` with compression enabled by mode (e.g. `bluestore_compression_mode=force/aggressive`) |
+| Real-world | **Confirmed on a live cluster**: `ceph osd pool set <pool> compression_algorithm none` accepted, `ceph df detail` shows the pool compressed |
 | Affected | main, tentacle (v20.1.0+) and squid (backport 1b296596287 has the same check); regression from a6a499ed5fc (2025-01, tracker 69507 "preload compressor plugins"). Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
@@ -38,6 +39,18 @@ Expected equality of these values:
   b.data_compressed_original
     Which is: 262144
 pool compression_algorithm=none ignored
+```
+
+## Live OSD reproduction
+vstart cluster; pools `ctl` and `none` with `compression_mode force`; `ctl` uses `compression_algorithm lz4`, `none` uses `compression_algorithm none`; 4 x 4 MiB compressible objects per pool via `rados put`; `ceph df detail` (`common/live-scenarios.sh 13`).
+```
+set pool 3 compression_mode to force
+set pool 4 compression_mode to force
+set pool 3 compression_algorithm to lz4
+set pool 4 compression_algorithm to none
+set rc=0
+pool ctl  stored=16777216 compress_under_bytes=16777216 compress_bytes_used=1048576
+pool none stored=16777216 compress_under_bytes=16777216 compress_bytes_used=1048576
 ```
 
 ## Suggested fix

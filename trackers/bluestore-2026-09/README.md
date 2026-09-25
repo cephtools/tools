@@ -1,49 +1,54 @@
 # BlueStore bug hunt — 2026-09
 
-23 bugs in BlueStore / BlueFS / ceph-bluestore-tool, each **reproduced** on a clean
-ceph `origin/main` @ 8e6a13e7a9a (2026-09-24; only the test patch applied) with the test
-or script in its directory — see
-[common/verify-origin-main-8e6a13e7a9a.txt](common/verify-origin-main-8e6a13e7a9a.txt),
-produced by [common/verify-all.sh](common/verify-all.sh). First found on 98fb1cf8c58.
-
+18 bugs in BlueStore / BlueFS / ceph-bluestore-tool that occur in real use, found by
+code review and reproduced on a clean ceph `origin/main` @ 8e6a13e7a9a (2026-09-24).
 Every item was searched on tracker.ceph.com (subject and full text) and on GitHub
-ceph/ceph PRs and issues in all states (open, merged, closed); none is already reported.
-Each report was reviewed against the source for accuracy, reachability and severity.
+ceph/ceph PRs and issues in all states; none is already reported. Each report was
+reviewed against the source for accuracy, reachability and severity.
 
-See [common/HOWTO.md](common/HOWTO.md) to run the reproducers and to file the reports.
+"Real-world" says how each bug was shown outside a unit test:
+- **live OSD**: a vstart cluster driven only by real client I/O (rados / librados) and
+  real admin commands ([common/live-scenarios.sh](common/live-scenarios.sh),
+  [01/live-osd-repro.sh](01-online-expand-label-not-reserved/live-osd-repro.sh));
+- **real tools**: `ceph-osd --mkfs`, `ceph-bluestore-tool`, `ceph-kvstore-tool`,
+  `ceph-objectstore-tool`, `ceph-conf` on a real OSD directory;
+- **store-level**: the real code path, but the precondition can only be created with
+  test hooks (repair of an already corrupted store) or observed through ObjectStore.
 
-| # | Bug | Component | Kind | Severity | Config | Repro |
-|---|-----|-----------|------|----------|--------|-------|
-| 01 | [Online expand leaves new bdev label copies unreserved](01-online-expand-label-not-reserved/) | bluestore | data corruption | major | default; online expand (main only) | gtest |
-| 02 | [HybridAllocator online expand after spillover: range free twice](02-hybrid-allocator-expand-double-free/) | allocator | double free / assert | major | default allocator, fragmented OSD, online expand | gtest |
-| 03 | [write_v2 deferred-reuse race overwrites newer data](03-write-v2-deferred-reuse-race/) | bluestore write_v2 | data corruption (csum EIO) | major | write_v2, min_alloc > 4K, HDD | gtest |
-| 04 | [rm_range_keys misses same-batch keys; omap_rmkeyrange leaves stale keys](04-kv-rm-range-ignores-same-txn-writes/) | kv / bluestore | stale omap | major | default | gtest |
-| 05 | [rename across hash orphans per-pg omap](05-rename-across-hash-loses-omap/) | bluestore | omap loss (API) | minor | default | gtest |
-| 06 | [clone_range srcoff != dstoff dups wrong writing buffers](06-clone-range-dup-writing-wrong-offset/) | bluestore cache | wrong data (API) | minor | buffered write | gtest |
-| 07 | [misreference repair overwrites false-free in-use blocks](07-repair-misref-into-false-free/) | fsck/repair | corruption by repair | major | bitmap freelist | gtest |
-| 08 | [shared-blob repair keeps only the first pextent](08-repair-shared-blob-first-pextent-only/) | fsck/repair | incomplete repair | minor | default | gtest |
-| 09 | [undecodable deferred txn passes fsck; repair EIO; OSD cannot mount](09-fsck-ignores-undecodable-deferred/) | fsck | unrecoverable start | major | default | script |
-| 10 | [BlueFS envelope ino reuse returns a deleted file's data](10-bluefs-envelope-ino-reuse-stale-data/) | bluefs | stale data after crash | minor | default | gtest |
-| 11 | [max_bytes_for_level_multiplier < 1 hangs mkfs/mount](11-vselector-level-multiplier-hang/) | bluefs, config | hang | minor | odd RocksDB option | script |
-| 12 | [max_blob_size_{hdd,ssd}=0 SIGFPE in write_v2](12-max-blob-size-zero-sigfpe/) | config | crash | minor | write_v2, dev option | gtest |
-| 13 | [pool compression_algorithm=none ignored](13-pool-compression-none-ignored/) | config | setting ignored (regression) | minor | pool option | gtest |
-| 14 | [bluestore_min_alloc_size typed uint: 64K = 64000](14-min-alloc-size-uint-units/) | config | mkfs fails | minor | unit suffix | script |
-| 15 | [small write near 4 GiB wraps fault_range](15-small-write-near-4g-fault-range-wrap/) | bluestore | crash | minor | osd_max_object_size ~4G | gtest |
-| 16 | [bluefs-import segfaults (*.log, missing dir)](16-bluefs-import-segfault/) | tool | crash | minor | default | script |
-| 17 | [revert_wal_to_plain ignores envelope WALs in db/](17-revert-wal-to-plain-skips-db-dir/) | bluefs / tool | downgrade ineffective | minor | pre-Nautilus OSDs | gtest |
-| 19 | [_remove_collection null deref before ENOENT check](19-remove-missing-collection-segfault/) | bluestore | crash (API misuse) | minor | default | gtest |
-| 20 | [reshard failure exits 0](20-reshard-failure-exit-zero/) | tool | wrong exit status | minor | any | script |
-| 21 | [fsck_read_bytes_cap=0 makes deep fsck hang](21-fsck-read-bytes-cap-zero-hang/) | fsck, config | hang | minor | option = 0 | script |
-| 22 | [freelist_blocks_per_key not validated](22-freelist-blocks-per-key-unvalidated/) | freelist, config | crash / abort | minor | dev option | script + gtest |
-| 23 | [non-power-of-2 BlueFS alloc size aborts](23-bluefs-alloc-size-non-pow2-abort/) | bluefs, config | crash | minor | option value | script |
-| 24 | [bluestore_max_alloc_size and 9 other options have no consumer](24-dead-options-max-alloc-size-ignored/) | config | option ignored | minor | any | gtest + static |
+All gtests and scripts: [common/verify-all.sh](common/verify-all.sh) ->
+[common/verify-origin-main-8e6a13e7a9a.txt](common/verify-origin-main-8e6a13e7a9a.txt).
+Running and filing: [common/HOWTO.md](common/HOWTO.md).
+
+| # | Bug | Severity | Config | Real-world |
+|---|-----|----------|--------|------------|
+| 01 | [Online expand leaves new bdev label copies unreserved](01-online-expand-label-not-reserved/) | major | default; online expand (main only) | live OSD: object unfound, HEALTH_ERR |
+| 02 | [HybridAllocator online expand after spillover: range free twice](02-hybrid-allocator-expand-double-free/) | major | fragmented OSD + online expand (main only) | live OSD: OSD abort |
+| 03 | [write_v2 deferred-reuse race overwrites newer data](03-write-v2-deferred-reuse-race/) | major | write_v2, min_alloc > 4K, HDD | live OSD: object unreadable |
+| 04 | [rm_range_keys misses same-batch keys; omap_rmkeyrange leaves stale keys](04-kv-rm-range-ignores-same-txn-writes/) | major | default | live OSD: stale omap key |
+| 07 | [misreference repair overwrites false-free in-use blocks](07-repair-misref-into-false-free/) | major | bitmap freelist, corrupted store | store-level |
+| 08 | [shared-blob repair keeps only the first pextent](08-repair-shared-blob-first-pextent-only/) | minor | corrupted store | store-level |
+| 09 | [undecodable deferred txn passes fsck; repair EIO; OSD cannot mount](09-fsck-ignores-undecodable-deferred/) | major | default | real tools |
+| 11 | [max_bytes_for_level_multiplier < 1 hangs mkfs/mount](11-vselector-level-multiplier-hang/) | minor | odd RocksDB option | real tools |
+| 12 | [max_blob_size_{hdd,ssd}=0 SIGFPE in write_v2](12-max-blob-size-zero-sigfpe/) | minor | write_v2, dev option | live OSD: OSD SIGFPE |
+| 13 | [pool compression_algorithm=none ignored](13-pool-compression-none-ignored/) | minor | pool option | live cluster |
+| 14 | [bluestore_min_alloc_size typed uint: 64K = 64000](14-min-alloc-size-uint-units/) | minor | unit suffix | real tools |
+| 15 | [small write near 4 GiB wraps fault_range](15-small-write-near-4g-fault-range-wrap/) | minor | osd_max_object_size ~4G | live OSD: OSD abort |
+| 16 | [bluefs-import segfaults (*.log, missing dir)](16-bluefs-import-segfault/) | minor | default | real tool |
+| 20 | [reshard failure exits 0](20-reshard-failure-exit-zero/) | minor | any | real tool |
+| 21 | [fsck_read_bytes_cap=0 makes deep fsck hang](21-fsck-read-bytes-cap-zero-hang/) | minor | option = 0 | real tool |
+| 22 | [freelist_blocks_per_key not validated](22-freelist-blocks-per-key-unvalidated/) | minor | dev option | real tools (+ store-level for 96) |
+| 23 | [non-power-of-2 BlueFS alloc size aborts](23-bluefs-alloc-size-non-pow2-abort/) | minor | option value | real tool |
+| 24 | [bluestore_max_alloc_size and 9 other options have no consumer](24-dead-options-max-alloc-size-ignored/) | minor | any | store-level + static check |
 
 `bluestore_write_v2` is off by default; it is randomized only with
 `bluestore_write_v2_random=true` (default off) and forced on in some QA objectstore suites.
 
 ## Withdrawn
-- 18 BlueFS `invalidate_cache()` unaligned length: real, but not reachable from the bundled
-  RocksDB; see [withdrawn/README.md](withdrawn/README.md).
+See [withdrawn/README.md](withdrawn/README.md):
+- not reachable from a real OSD (ObjectStore API only): 05 rename across hash,
+  06 clone_range with shifted offsets, 19 `_remove_collection` null deref;
+- not demonstrated in real use: 10 BlueFS envelope ino reuse, 17 revert_wal_to_plain
+  on pre-Nautilus OSDs, 18 BlueFS `invalidate_cache`.
 
 ## Known / not recorded
 - Offline expand leaks old end padding with the bitmap freelist: tracker **64567**.

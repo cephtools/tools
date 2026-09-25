@@ -6,6 +6,7 @@
 | Kind | tool crash |
 | Severity | minor |
 | Config | default (`bluefs_wal_envelope_mode=true`) |
+| Real-world | **Real tool**: `ceph-bluestore-tool bluefs-import` on an OSD created by `ceph-osd --mkfs` |
 | Affected | main (envelope mode, v20+). Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary

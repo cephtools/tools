@@ -6,6 +6,7 @@
 | Kind | cleanup / configuration silently ignored |
 | Severity | minor |
 | Config | any |
+| Real-world | Same allocation code path as OSD writes; shown at the ObjectStore level plus a static check of option consumers |
 | Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary

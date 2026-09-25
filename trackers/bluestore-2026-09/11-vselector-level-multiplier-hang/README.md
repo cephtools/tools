@@ -6,6 +6,7 @@
 | Kind | hang (100% CPU) in OSD mkfs/mount and ceph-bluestore-tool instead of an error |
 | Severity | minor |
 | Config | RocksDB option `max_bytes_for_level_multiplier < 1` (via `bluestore_rocksdb_options[_annex]`); default policy `bluestore_volume_selection_policy=use_some_extra` with `bluestore_volume_selection_reserved=0`; a dedicated DB device larger than level0 + base (about 2 GiB with defaults: 16M x 64 + 1G) |
+| Real-world | **Real tools**: `ceph-osd --mkfs` with the RocksDB option hangs |
 | Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary

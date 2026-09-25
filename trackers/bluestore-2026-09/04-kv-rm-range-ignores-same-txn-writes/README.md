@@ -6,6 +6,7 @@
 | Kind | stale omap data (rmkeyrange: client-reachable); clear/clone/remove variants: ObjectStore API only |
 | Severity | major |
 | Config | default |
+| Real-world | **Confirmed on a live OSD**: one librados write op (`omap_set` + `omap_rm_range`) leaves the key |
 | Affected | main. Reproduced on origin/main 8e6a13e7a9a; MemStore passes the same tests |
 
 ## Summary
@@ -61,6 +62,12 @@ OmapRemoveSeesSameTxnKeys/1:
 fsck error: found stray (per-pg) omap data on omap_head  key 0x000000000000030C0000000000000000000000012E6B1 0 0
   store->fsck(false)
     Which is: 1
+```
+
+## Live OSD reproduction
+vstart 1 OSD, default config; librados: set omap `a`,`d`; then ONE write op with `set_omap(b)` + `remove_omap_range2(a, c)`; list omap (`common/live-scenarios.sh 04`).
+```
+omap keys after op: ['b', 'd'] (expected ['d'])
 ```
 
 ## Expected

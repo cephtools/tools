@@ -6,6 +6,7 @@
 | Kind | crash on every uncompressed write |
 | Severity | minor |
 | Config | non-default: `bluestore_write_v2=true` and the applicable `bluestore_max_blob_size_hdd` / `_ssd` set to 0 (all three blob-size options are `level: dev`, `runtime`, no `min`) |
+| Real-world | **Confirmed on a live OSD**: `ceph config set osd bluestore_max_blob_size_hdd 0` + `rados put` -> OSD SIGFPE |
 | Affected | main. Reproduced on origin/main 8e6a13e7a9a |
 
 ## Summary
@@ -32,6 +33,14 @@ gtest `StoreTestSpecificAUSize.ZeroMaxBlobSizeWriteV2` (`test.cc`): `bluestore_w
  2: (BlueStore::Writer::_split_data(unsigned int, ceph::buffer::v15_2_0::list&, std::vector<BlueStore::Writer::blob_data_t, ...>&)+0x63)
  3: (BlueStore::Writer::do_write(unsigned int, ceph::buffer::v15_2_0::list&)+0x93)
  4: (BlueStore::_do_write_v2(BlueStore::TransContext*, ...)
+```
+
+## Live OSD reproduction
+vstart 1 OSD with `bluestore_write_v2=true`; `ceph config set osd bluestore_max_blob_size_hdd 0` (and `_ssd`); `rados -p p put obj <64K file>` (`common/live-scenarios.sh 12`).
+```
+rados put rc=124
+OSD DIED:
+*** Caught signal (Floating point exception) **
 ```
 
 ## Suggested fix

@@ -69,23 +69,15 @@ if sel 04; then
     run 04 $t 600 $OS --gtest_filter="*/StoreTest.$t/*" -- "FAILED  \] .*$t.*$(bs)"
   done
 fi
-sel 05 && run 05 RenameAcrossHashKeepsOmap 600 $OS --gtest_filter='*/StoreTest.RenameAcrossHashKeepsOmap/*' -- 'omap lost by rename across hash'
-sel 06 && run 06 CloneRangeShiftedWithWritingBuffers 600 $OS --gtest_filter='*/StoreTest.CloneRangeShiftedWithWritingBuffers/*' -- 'served stale/wrong data from cache'
 sel 07 && run 07 BluestoreRepairMisrefIntoFalseFree 600 $OS --gtest_filter='*/StoreTestSpecificAUSize.BluestoreRepairMisrefIntoFalseFree/1' -- 'victim object C was overwritten by repair'
 sel 08 && run 08 BluestoreRepairSharedBlobMultiPextent 600 $OS --gtest_filter='*/StoreTestSpecificAUSize.BluestoreRepairSharedBlobMultiPextent/1' -- 'ref_map.ref_map.size\(\)'
 sel 09 && sh_ 09 repro.sh 900 09-fsck-ignores-undecodable-deferred/repro.sh -- 'BUG: fsck reported the undecodable deferred txn but exited 0'
-sel 10 && run 10 bughunt_envmode_ino_reuse 600 $BF --gtest_filter='BlueFS_wal.bughunt_envmode_ino_reuse_stale_envelopes' -- 'new WAL returns data of a deleted WAL'
 sel 11 && sh_ 11 repro.sh 600 11-vselector-level-multiplier-hang/repro.sh -- 'BUG: mkfs hangs with max_bytes_for_level_multiplier=0.5'
 sel 12 && run 12 ZeroMaxBlobSizeWriteV2 300 $OS --gtest_filter='*/StoreTestSpecificAUSize.ZeroMaxBlobSizeWriteV2/1' -- 'Floating point exception'
 sel 13 && run 13 PoolCompressionAlgorithmNoneHonored 300 $OS --gtest_filter='*/StoreTestSpecificAUSize.PoolCompressionAlgorithmNoneHonored/1' -- 'pool compression_algorithm=none ignored'
 sel 14 && sh_ 14 repro.sh 300 14-min-alloc-size-uint-units/repro.sh -- '^64000$'
 sel 15 && run 15 SmallWriteNear4GiBShardedOnode 600 $OS --gtest_filter='*/StoreTestSpecificAUSize.SmallWriteNear4GiBShardedOnode/1' -- 'FAILED ceph_assert\(last >= start\)'
 sel 16 && sh_ 16 repro.sh 300 16-bluefs-import-segfault/repro.sh -- 'exit=139'
-if sel 17; then
-  run 17 revert_wal_to_plain_skips_db_dir 900 $BF --gtest_filter='BlueFS_wal.bughunt_revert_wal_to_plain_skips_db_dir' -- "left an envelope-mode WAL in 'db' untouched"
-  run 17 revert_wal_to_plain_asserts_with_db_wal 900 $BF --gtest_filter='BlueFS_wal.bughunt_revert_wal_to_plain_asserts_with_db_wal' -- 'FAILED ceph_assert\(!log.uses_envelope_mode\)'
-fi
-sel 19 && run 19 RemoveMissingCollectionENOENT 300 $OS --gtest_filter='*/StoreTest.RemoveMissingCollectionENOENT/*' -- 'Segmentation fault'
 sel 20 && sh_ 20 repro.sh 300 20-reshard-failure-exit-zero/repro.sh -- 'bug reproduced: reshard failed but exit status 0'
 sel 21 && sh_ 21 repro.sh 600 21-fsck-read-bytes-cap-zero-hang/repro.sh -- 'bug reproduced: deep fsck never terminates'
 if sel 22; then

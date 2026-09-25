@@ -29,7 +29,7 @@ mkdir -p /tmp/st && cd /tmp/st
 Each test PASSES on fixed code and FAILS / aborts on 98fb1cf8c58.
 `--plugin_dir` is needed so compressor plugins load (bug 13).
 Parameterized StoreTest cases run for memstore too; memstore passing while
-bluestore fails is part of the evidence (bugs 04, 05, 19).
+bluestore fails is part of the evidence (bug 04).
 
 ## shell reproducers (`repro.sh`)
 Run as root on a host with a ceph build; they source `common.sh`:
@@ -58,3 +58,14 @@ Affected Versions (9), Pull request ID (21, set when a fix is posted).
    The new issue URL is saved in `NN-slug/TRACKER`; the script refuses to file a record twice.
 3. When a fix PR is posted, put its number in "Pull request ID" and add
    `Fixes: https://tracker.ceph.com/issues/<id>` to the commit message.
+
+## Live-OSD reproductions
+`common/live-scenarios.sh <ids>` starts a fresh 1-OSD vstart cluster per scenario
+(`VSTART_DEST`, default /root/bh/vs) and triggers the bug with real client I/O
+(librados python bindings from `<build>/lib/cython_modules`) and admin commands only.
+Scenarios: 02, 03, 04, 12, 13, 15; bug 01 has its own `01-*/live-osd-repro.sh`.
+```
+BUILD=<ceph>/build bash common/live-scenarios.sh 02 03 04 12 13 15
+BUILD=<ceph>/build bash 01-online-expand-label-not-reserved/live-osd-repro.sh
+```
+Needs `ninja vstart-base rados` in addition to the binaries above.

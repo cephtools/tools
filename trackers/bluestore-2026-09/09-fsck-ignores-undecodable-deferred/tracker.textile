@@ -4,6 +4,7 @@ Subject: BlueStore: undecodable deferred txn passes fsck, repair fails with EIO,
 |Kind|fsck false negative; unrecoverable OSD start failure|
 |Severity|major|
 |Config|default; needs an on-disk corrupt value under the deferred prefix @L@ (injected here with ceph-kvstore-tool)|
+|Real-world|*Real tools*: OSD created by @ceph-osd --mkfs@, then @ceph-bluestore-tool fsck/repair@ and @ceph-objectstore-tool@; the corrupt record is injected with @ceph-kvstore-tool@ (tracker 49847 is a field report of this state)|
 |Affected|main. Reproduced on origin/main 8e6a13e7a9a|
 |Related|tracker 49847 (field report of this mount failure, closed as a hardware problem)|
 

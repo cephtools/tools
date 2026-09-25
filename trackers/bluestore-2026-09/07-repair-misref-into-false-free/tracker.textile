@@ -4,6 +4,7 @@ Subject: fsck repair: misreference fix allocates from the corrupt freelist and o
 |Kind|data corruption caused by repair|
 |Severity|major (for stores that need this repair)|
 |Config|bitmap freelist only (@bluestore_allocation_from_file=false@, rotational DB, or a pre-NCB OSD); with NCB (default on SSD) fsck skips the freelist-vs-allocated check (BlueStore.cc:11919). Requires a store that already has both misreferenced extents and false-free ranges|
+|Real-world|Real trigger path is @ceph-bluestore-tool repair@ on a store that already has both errors; that corruption can only be created with BlueStore test hooks, so it is demonstrated at the ObjectStore level|
 |Affected|main. Reproduced on origin/main 8e6a13e7a9a|
 
 h3. Summary
