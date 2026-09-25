@@ -6,8 +6,8 @@ were the traces in the blog post
 [Ceph OSD Analysis](https://ming1.github.io/storage/ceph-osd-analysis): one
 16 KiB read (§4.1) and one 16 KiB write on three OSDs (§4.2).
 
-**Status:** found by code analysis and a perf profile; six candidates
-measured so far (2026-09-25, see [Measured so far](#measured-so-far)), two of
+**Status:** found by code analysis and a perf profile; seven candidates and
+one item of record 17 measured so far (2026-09-25, see [Measured so far](#measured-so-far)), two of
 them as working fixes (03, 05). The other cost figures
 are estimates from the code. All `file:line` references are to v21.3.0 under
 `src/`.
@@ -18,9 +18,10 @@ All on 3 BlueStore OSDs on brd ramdisks, where the device is not the
 bottleneck and per-op cost shows up as OSD CPU, in interleaved rounds (3 per
 leg). OSD CPU per op, context switches and BlueStore transactions per op are
 the reliable metrics: legs that cannot affect a workload moved them by a few
-percent. Client IOPS is noisy (up to ~15%). For replicated 4k I/O, lower OSD
-CPU did not raise client IOPS in this 3-OSD setup; for EC writes it did
-(record 03). What limits client IOPS here was not measured.
+percent. Client IOPS is not reliable here: in batch 4 two legs that change
+nothing measurable (15, data digest) reached +16–18% IOPS against stock with
+separate ranges, so IOPS changes below ~18% are not evidence. What limits
+client IOPS in this 3-OSD setup was not measured.
 
 | # | Candidate | Result | Raw data |
 |---|-----------|--------|----------|
@@ -30,10 +31,48 @@ CPU did not raise client IOPS in this 3-OSD setup; for EC writes it did
 | 02 | cheap stats publish | mechanism confirmed (full publishes 594,936 → 320), CPU per op ~1%, within noise: **minor** | ab1 |
 | 01 | commit callbacks before the PG lock | **not shown**: the 3-round mean looked 8–12% better, but that came from one slow stock round; against the other stock rounds, −2% to −6% write latency under mixed load and no change elsewhere | ab2 |
 | 14 | delayed standalone messenger ACKs | **not shown**: OSD CPU per write −1.9%, within noise | ab3 |
-| 15 | bounded PG log trim walk | not yet measured (profile: 0.5% of OSD CPU); A/B running | — |
+| 15 | bounded PG log trim walk | **not shown** at 128 PGs per OSD: CPU per op −1.1% to +3.1%, within noise (profile share 0.5%) | ab4 |
+| 17 (F5 only) | `osd_skip_data_digest = true` | **not shown**: CPU per op −1.6% to +3.6%, within noise (the option was passed to the OSDs; its effect was not checked separately) | ab4 |
 
-Raw data: `results/2026-09-25-ab1.txt`, `-ab2.txt`, `-ab3.txt` (with
-per-round values).
+Raw data: `results/2026-09-25-ab1.txt` … `-ab5.txt` (with per-round values).
+
+### The four changes together
+
+Switch 05 + the delayed EC roll-forward (100 ms) + obc cache 512 + switch 15
+(leg `patches=05,15 rf_delay_ms=100 conf=[osd_pg_object_context_cache_count
+= 512]`), against stock in the same batch (`results/2026-09-25-ab5.txt`;
+every CPU range is separate from stock's, `qd1` by only 1 µs):
+
+| workload | OSD CPU per op, stock → all | other |
+|---|---|---|
+| `rw4k` 4k write -t 64 | 652 → 604 µs (−7.4%) | context switches −42% |
+| `rr4k` 4k random read -t 64 | 87.7 → 76.5 µs (−12.8%) | |
+| `ec4k` EC 4k write -t 16 | 1004 → 732 µs (−27.1%) | EC write IOPS +18.5%, BlueStore transactions 5.2 → 3.0 per write |
+| `qd1` 4k write -t 1 | 962 → 894 µs (−7.1%) | IOPS +11.6% |
+| `orr` 4k read, 500 objects per PG | 56.3 → 47.3 µs (−16.1%) | OSD read latency −24% |
+| `mixw` writes + reads | 897 → 842 µs (−6.2%) | |
+
+- On the replicated workloads (`rw4k`, `rr4k`, `mixw`) the combined gain
+  equals switch 05's alone in the same batch (−7.6% / −12.2% / −6.1%): the
+  other changes do not act there, and they do not cancel it. On `ec4k` and
+  `orr` the gains stack: the EC roll-forward and the obc cache add on top of
+  switch 05 (05 alone: −4.6% and −4.3%). On `qd1` the combination (−7.1%) is
+  a little less than 05 alone (−10.5%).
+- A leg with switch 05 and obc 512 only was a little worse than 05 alone on
+  the replicated workloads, but its ranges overlap and the full combination
+  (which also has obc 512) matches 05 alone, so this is most likely noise.
+- An earlier combined run (`-ab4.txt`) showed only −2% to −4% on the
+  replicated workloads, with ranges overlapping stock's: in that batch stock
+  used less CPU and the combined leg more than in batch 5 (drift between
+  batches). So the replicated-path gain of the combination reproduced in one
+  of two batches; switch 05 on its own reproduced in both of its batches
+  (ab3, ab5).
+- IOPS: see the note above; the EC IOPS gain is partly within what null legs
+  reached, while its CPU (−27%) and BlueStore transactions (−42%) per write
+  are robust.
+- The two big-pool drops leave the 8 GiB ramdisks partly full; one combined
+  leg filled a ramdisk and stopped after 5 of 6 workloads, so the combined
+  leg has 2 `mixw` rounds instead of 3.
 
 ## Where the CPU goes
 
@@ -64,10 +103,10 @@ Ranked by expected gain per line of change, updated with the measurements.
 | 03 | [EC dummy roll-forward op after most writes](03-ec-dummy-roll-forward/) | EC | small | **measured fix**: −42% BlueStore transactions, −24% OSD CPU, +19% IOPS per EC write | rbd 4k randwrite on EC |
 | 05 | [One queued item wakes every thread of the shard](05-op-shard-wakes-all-threads/) | op queue | small | **measured fix**: −6% to −15% OSD CPU per op, every workload | any small I/O |
 | 06 | [Object-context cache: 64 per PG, two getattrs per miss](06-obc-cache-small/) | PG | config + small | **measured**: −10.5% OSD CPU per read at 500 objects per PG | 4k randread, warm |
-| 16 | [About 180 clock reads per client write](16-clock-reads-per-op/) | op tracker, OSD, messenger, BlueStore | small each | profile: 3.2% of OSD CPU | 4k write / read |
-| 15 | [The PG log trim point search walks up to `target` entries](15-pglog-trim-walk/) | PG log | a few lines | profile: 0.5% of OSD CPU | 4k write |
+| 16 | [About 180 clock reads per client write](16-clock-reads-per-op/) | op tracker, OSD, messenger, BlueStore | small each | profile: vDSO 3.6–4.8% of OSD CPU | 4k write / read |
+| 15 | [The PG log trim point search walks up to `target` entries](15-pglog-trim-walk/) | PG log | a few lines | **measured**: not shown at 128 PGs per OSD (profile 0.5%) | 4k write |
 | 18 | [Thread handoffs and wakeups below the OSD op code](18-bluestore-thread-handoffs/) | BlueStore, messenger | small–high | profile: futex 14.8% | 4k write |
-| 17 | [More per-op costs: allocations, peer lookups, copies](17-per-op-allocations-and-lookups/) | OSD | small each | profile bucket ~9% (each item < 1 µs) | 4k write / read |
+| 17 | [More per-op costs: allocations, peer lookups, copies](17-per-op-allocations-and-lookups/) | OSD | small each | profile bucket ~9%; F5 (data digest) **measured**: not shown | 4k write / read |
 | 04 | [Deep scrub reads a whole chunk in one PG-lock hold](04-deep-scrub-no-yield/) | scrub | ~3 lines | client p99 during deep scrub | 4k writes + deep-scrub |
 | 07 | [BlueStore submit (io_submit) under the PG lock](07-store-submit-under-pg-lock/) | BlueStore | medium | PG-lock time per write | 4k randwrite, few PGs |
 | 08 | [Replicated read holds the PG lock across the device](08-replicated-read-holds-pg-lock/) | read | large | hot-PG latency on cache miss | mixed r/w, cold cache |

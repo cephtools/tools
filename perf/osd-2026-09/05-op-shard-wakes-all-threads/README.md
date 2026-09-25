@@ -77,6 +77,14 @@ layout (8 shards × 2 threads).
 - Client IOPS at queue depth 64 did not go up (`rw4k` −2.6%, `rr4k` −5.6%,
   ranges overlap). In this 3-OSD setup OSD CPU is not what limits client
   IOPS; what does was not measured.
+- Repeated in a later batch (`results/2026-09-25-ab5.txt`): switch 05 alone,
+  OSD CPU per op `rw4k` −7.6%, `rr4k` −12.2%, `ec4k` −4.6%, `qd1` −10.5%,
+  `mixw` −6.1% (ranges separate from stock), `orr` −4.3% (ranges overlap).
+  With the other changes on as well, the replicated-path gain is about the
+  same, so they do not cancel it.
+- IOPS in that batch rose 12–14% on `rw4k`, `qd1` and `mixw`, but legs that
+  change nothing reached +16–18% against stock in the batch before, so these
+  IOPS changes are not evidence either way.
 - The fix was reviewed twice. The first review found a lost wakeup (a thread
   that was signalled but had not yet re-taken the lock was still counted as
   asleep, so a second item could signal nobody); it is fixed by counting the

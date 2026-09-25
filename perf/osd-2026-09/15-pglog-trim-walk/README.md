@@ -6,7 +6,7 @@
 | Change | a few lines (switch 15 in `common/measurement-switches.patch`) |
 | Expected gain | profile: 0.5% of OSD CPU on 4k writes (self time) |
 | Risk | low (same result, checked by review and a brute-force comparison) |
-| Status | profile-backed; the A/B is running |
+| Status | **not shown at 128 PGs per OSD** (2026-09-25); the worst case (long logs, ≤ 30 PGs per OSD) was not measured |
 
 ## Summary
 
@@ -44,6 +44,18 @@ pg_trim_to = std::min(std::next(log.begin(), idx)->version, limit);
 
 An independent review checked equivalence case by case and by brute force
 (n 0..14, target 0..16, num_to_trim 0..19, 3 limits: 0 mismatches).
+
+## Measured
+
+Switch 15 against stock, 3 interleaved rounds (`results/2026-09-25-ab4.txt`):
+OSD CPU per op `rw4k` +2.1%, `rr4k` +2.7%, `ec4k` +3.1%, `qd1` −1.1%, `orr`
++1.7%, `mixw` +0.2% — all within noise (ranges overlap). The walk's 0.5%
+share of the profile is below what this setup can resolve.
+
+Each OSD here holds 128 PGs (64 after the two big pools are dropped), so the
+log target is about 2,300–4,700 entries, well below the 10,000 worst case,
+which needs 30 PGs per OSD or fewer. So this run tested a medium walk; the
+worst case was not measured. The change is cheap and gives the same result.
 
 ## How to observe
 

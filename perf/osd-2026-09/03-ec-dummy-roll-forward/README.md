@@ -91,7 +91,10 @@ m=1 pool, `-t 16`):
 | client IOPS | 17.9k [16.2k..19.0k] | **21.3k [21.1k..21.5k] (+19%)** | 21.3k (+18.5%) |
 | client latency | 0.90 ms | 0.75 ms (−16%) | 0.75 ms |
 
-All five changes are beyond noise (the ranges do not overlap). The A/B legs
+All five changes are beyond noise (the ranges do not overlap). Of these, the
+BlueStore transactions and OSD CPU per write are the robust numbers: in a
+later batch, legs that change nothing reached up to +18% client IOPS against
+stock, so part of the IOPS gain may be noise. The A/B legs
 do not verify data; three separate smoke legs with the delayed roll-forward
 on (20 ms v1, then 100 ms v2 with switches 05 and 14; 8–10 s EC write runs)
 read back and compared every EC object they wrote (`VERIFY=1`: 187,735,
