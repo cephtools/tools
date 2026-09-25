@@ -6,7 +6,7 @@
 | Change | small, but must not undo `d1cf3fb80bc` |
 | Expected gain | CPU and `shard_lock` contention per op; low-QD latency |
 | Risk | medium (lost wakeups) |
-| Status | code analysis, not measured |
+| Status | **mechanism confirmed** with a config-only proxy (2026-09-25); the proxy has a queue-depth-1 regression; the code fix is not built |
 
 ## Summary
 
@@ -47,6 +47,34 @@ the patch 263.5k.
   owner's variable. Otherwise a new item waits until a busy thread finishes
   its op, which is the low-QD latency this change is meant to remove.
 - `stop_waiting` and the drain paths must signal both variables.
+
+## Measured
+
+Setup: as in record 03 (3 BlueStore OSDs on brd ramdisks, 3 interleaved
+rounds, 30 s per workload), with the pool drops that keep the ramdisks from
+filling. Raw output, including the per-round values:
+`results/2026-09-25-ab2.txt`.
+
+Config-only proxy: 16 shards × 1 thread (`osd_op_num_shards_ssd = 16`,
+`osd_op_num_threads_per_shard_ssd = 1`) against the default 8 × 2. With one
+thread per shard, a wakeup can only reach the thread that has the work.
+
+| workload | `tp_osd_tp` context switches / op | OSD CPU / op | other |
+|---|---|---|---|
+| `rw4k` 4k write -t 64 | 12.6 → 5.8 (−54%) | 632 → 584 µs (−7.5%) | OSD write latency lower in every round (1236–1272 µs against 1324–1710) |
+| `rr4k` 4k read -t 64 | 2.80 → 1.65 (−41%) | 85.0 → 73.8 µs (−13.2%) | |
+| `orr` 4k read, small set | 1.14 → 0.91 (−20%) | 56.1 → 49.2 µs (−12.4%) | |
+| `mixw` mixed | 11.4 → 7.4 (−35%) | 874 → 800 µs (−8.5%) | |
+| `ec4k` EC write | 16.6 → 11.2 (−33%) | 973 → 924 µs (−5.0%) | |
+| **`qd1` 4k write -t 1** | 11.7 → 8.1 (−31%) | +3.1% | **IOPS 2086 → 1017 (−51%), OSD write latency 385 → 897 µs**, in all 3 rounds |
+
+- The CPU ranges do not overlap the stock ranges: fewer wakeups, less CPU,
+  as the theory says.
+- But the proxy is not a fix: at queue depth 1 it doubles the latency. The
+  extra ~500 µs per op looks like waiting, not CPU; the cause is not known
+  yet (to check with an off-CPU trace of `tp_osd_tp`). The code change above
+  (one wakeup per item, a separate wakeup for the owner thread) keeps 2
+  threads per shard and still has to be built and measured.
 
 ## How to observe
 

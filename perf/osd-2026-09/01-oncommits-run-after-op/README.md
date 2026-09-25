@@ -6,7 +6,7 @@
 | Change | 3 lines |
 | Expected gain | write-ack latency of every PG in a shard, under mixed load |
 | Risk | low |
-| Status | code analysis, not measured |
+| Status | **not shown** by the measurement so far (2026-09-25); a small effect under mixed load is possible |
 
 ## Summary
 
@@ -76,6 +76,30 @@ Edge cases, checked in `OSD.cc:11240-11448`:
 What remains after the change: a `BlessedContext` for a PG whose lock is held
 by a long op (a cache-missing read) still blocks the commits after it. A later
 step could `try_lock` per PG and defer that PG's commits.
+
+## Measured
+
+Setup: as in record 03 (3 BlueStore OSDs on brd ramdisks, 3 interleaved
+rounds, 30 s per workload), with the pool drops that keep the ramdisks from
+filling. Raw output, including the per-round values:
+`results/2026-09-25-ab2.txt`.
+
+Switch 01 against stock. Averaged over 3 rounds, write latency looked 5–12%
+lower, but that came from one slow stock round (round 3 was slow in three
+workloads). Per round, against stock rounds 1 and 2:
+
+| workload | stock r1 / r2 | switch 01 r1 / r2 / r3 |
+|---|---|---|
+| `rw4k` 4k write -t 64, IOPS | 29.4k / 30.7k | 30.9k / 29.9k / 31.0k |
+| `mixw` 4k write -t 32 + reads, OSD write latency | 971 / 1011 µs | 948 / 952 / 925 µs |
+| `qd1` 4k write -t 1, OSD write latency | 389 / 375 µs | 371 / 390 / 365 µs |
+
+- Plain writes: no difference.
+- Mixed load: 2–6% lower write latency, too small to separate from noise in
+  three rounds.
+- A ramdisk makes every op short, so the case the theory is about (a commit
+  waiting behind a long op, such as a read that misses the cache on a real
+  disk) does not happen here. That case needs a real device.
 
 ## How to observe
 
