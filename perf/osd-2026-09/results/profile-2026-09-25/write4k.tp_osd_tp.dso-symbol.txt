@@ -1,0 +1,34 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 239
+#
+# Samples: 161K of event 'cpu/cycles/P'
+# Event count (approx.): 1048027049126
+#
+# Overhead  Shared Object         Symbol  IPC   [IPC Coverage]
+# ........  ....................  .........................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+     1.75%  [kernel.kallsyms]     [k] entry_SYSRETQ_unsafe_stack
+     1.41%  [vdso]  [.] 0x0000000000000989
+     1.27%  libc.so.6  [.] __memmove_avx512_unaligned_erms
+     1.04%  libtcmalloc.so.4.6.3  [.] operator new[](unsigned long)
+     0.90%  libtcmalloc.so.4.6.3  [.] operator delete[](void*, unsigned long)
+     0.80%  ceph-osd  [.] ceph::buffer::v15_2_0::list::append(char const*, unsigned int)
+     0.79%  ceph-osd  [.] ceph::buffer::v15_2_0::list::iterator_impl<true>::copy(unsigned int, char*)
+     0.78%  ceph-osd  [.] OSD::ShardedOpWQ::_process(unsigned int, unsigned int, ceph::heartbeat_handle_d*)
+     0.77%  ceph-osd  [.] ceph::buffer::v15_2_0::ptr::copy_out(unsigned int, unsigned int, char*) const
+     0.77%  ceph-osd  [.] rocksdb::MemTable::KeyComparator::operator()(char const*, rocksdb::Slice const&) const
+     0.71%  ceph-osd  [.] non-virtual thunk to rocksdb::(anonymous namespace)::BytewiseComparatorImpl::Compare(rocksdb::Slice const&, rocksdb::Slice const&) const
+     0.68%  ceph-osd  [.] ceph::buffer::v15_2_0::ptr::append(char const*, unsigned int)
+     0.64%  [kernel.kallsyms]     [k] dequeue_entity
+     0.63%  [kernel.kallsyms]     [k] futex_wait_setup
+     0.54%  [kernel.kallsyms]     [k] srso_alias_safe_ret
+     0.53%  libc.so.6  [.] pthread_mutex_lock@@GLIBC_2.2.5
+     0.51%  libc.so.6  [.] __GI___pthread_mutex_unlock_usercnt
+     0.51%  ceph-osd  [.] PeeringState::calc_trim_to_aggressive()
+
+
+#
+# (Tip: To trace only single function with Processor Trace use perf record --filter 'filter func @ program' -e intel_pt//u ./program ; perf script --insn-trace)
+#

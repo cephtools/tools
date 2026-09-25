@@ -10,9 +10,10 @@
 #   rw4k   rados bench write -b 4096 -t 64 on replicated pool rp (size 3)
 #   rr4k   rados bench rand  -t 64 on the objects of rw4k
 #   ec4k   rados bench write -b 4096 -t 16 on EC pool ep (k=2 m=1, overwrites + optimizations)
-#   qd1    rados bench write -b 4096 -t 1 on rp
+#   qd1    rados bench write -b 4096 -t 1 on rq
 #   orr    rados bench rand -t 64 on pool op, 16000 objects (500 per PG, obc cache)
-#   mixw   rados bench write -b 4096 -t 32 on rp while rand -t 32 runs on op
+#   mixw   rados bench write -b 4096 -t 32 on rq while rand -t 32 runs on op
+# Pools rp and ep are deleted after their workloads (8 GiB ramdisks).
 # Per workload: rados bench summary, OSD CPU (utime+stime of all ceph-osd
 # processes) per op, tp_osd_tp voluntary context switches per op, bluestore
 # transactions per op, perf-counter latencies.
@@ -23,6 +24,8 @@ OUT=${2:?out dir}
 PATCHES=${3:?patches}
 shift 3
 SECS=${SECS:-30}
+RF_DELAY_MS=${RF_DELAY_MS:-0}    # record 03 delayed roll-forward (0 = stock)
+VERIFY=${VERIFY:-0}              # 1: read back and verify the EC objects
 DEVS=${DEVS:-/dev/ram0,/dev/ram1,/dev/ram2}
 mkdir -p "$OUT"; OUT=$(realpath "$OUT")
 cd "$BUILD"
@@ -112,6 +115,34 @@ run() {  # run <tag> <pool> <rados bench args...>
 	} | tee "$OUT/$tag.summary"
 }
 
+used_bytes() {
+	bin/ceph df -f json 2>/dev/null |
+		python3 -c 'import json,sys; print(json.load(sys.stdin)["stats"]["total_used_raw_bytes"])'
+}
+
+drop_pool() {  # delete a pool, then wait until the OSDs have freed its space,
+	           # so PG deletion does not run during the next workload
+	bin/ceph osd pool rm "$1" "$1" --yes-i-really-really-mean-it >/dev/null
+	# wait until used space is back near the level after setup (PG deletion
+	# done), or has not changed for 60 s; at most 300 s
+	local i cur prev=0 still=0
+	for i in $(seq 1 60); do
+		sleep 5
+		cur=$(used_bytes)
+		[ "$cur" -lt $((BASE_USED + (1536 << 20))) ] && break
+		if [ "$prev" -gt 0 ] && [ $((prev - cur)) -lt $((16 << 20)) ] && \
+		   [ $((cur - prev)) -lt $((16 << 20)) ]; then
+			still=$((still + 5))
+			[ "$still" -ge 60 ] && break
+		else
+			still=0
+		fi
+		prev=$cur
+	done
+	echo "after dropping $1: used $(( $(used_bytes) >> 20 )) MiB" | tee -a "$OUT/leg.txt"
+	sleep 5
+}
+
 # ---- cluster ----
 for d in ${DEVS//,/ }; do
 	[ "$(blockdev --getsize64 "$d" 2>/dev/null || echo 0)" -ge $((4 << 30)) ] \
@@ -136,19 +167,23 @@ conf=(
 )
 for c in "$@"; do conf+=(-o "$c"); done
 
-echo "leg: patches=$PATCHES conf=[$*]" | tee "$OUT/leg.txt"
-CEPH_PERF_PATCHES=$PATCHES MON=1 OSD=3 MDS=0 MGR=1 RGW=0 NFS=0 \
+echo "leg: patches=$PATCHES rf_delay_ms=$RF_DELAY_MS conf=[$*]" | tee "$OUT/leg.txt"
+CEPH_PERF_EC_RF_DELAY_MS=$RF_DELAY_MS CEPH_PERF_PATCHES=$PATCHES MON=1 OSD=3 MDS=0 MGR=1 RGW=0 NFS=0 \
 	../src/vstart.sh -n -l --nolockdep --without-dashboard -b --bluestore-devs "$DEVS" \
 	"${conf[@]}" > "$OUT/vstart.log" 2>&1
 for p in $(osd_pids); do
 	tr '\0' '\n' < "/proc/$p/environ" | grep -q "^CEPH_PERF_PATCHES=$PATCHES$" \
 		|| { echo "osd pid $p does not have CEPH_PERF_PATCHES=$PATCHES" >&2; exit 1; }
+	tr '\0' '\n' < "/proc/$p/environ" | grep -q "^CEPH_PERF_EC_RF_DELAY_MS=$RF_DELAY_MS$" \
+		|| { echo "osd pid $p does not have CEPH_PERF_EC_RF_DELAY_MS=$RF_DELAY_MS" >&2; exit 1; }
 done
 
 bin/ceph osd pool create rp 32 32 replicated >/dev/null
 bin/ceph osd pool set rp size 3 >/dev/null
 bin/ceph osd pool create op 32 32 replicated >/dev/null
 bin/ceph osd pool set op size 3 >/dev/null
+bin/ceph osd pool create rq 32 32 replicated >/dev/null
+bin/ceph osd pool set rq size 3 >/dev/null
 bin/ceph osd erasure-code-profile set ec21 k=2 m=1 crush-failure-domain=osd >/dev/null
 bin/ceph osd pool create ep 32 32 erasure ec21 >/dev/null
 bin/ceph osd pool set ep allow_ec_overwrites true >/dev/null
@@ -169,16 +204,29 @@ bin/ceph pg stat | tee -a "$OUT/leg.txt"
 	echo "binary: patched build, switches '$PATCHES'"
 } | tee -a "$OUT/leg.txt"
 sleep 5
+BASE_USED=$(used_bytes)
+echo "used after setup: $((BASE_USED >> 20)) MiB" | tee -a "$OUT/leg.txt"
 # idle OSD CPU rate (ticks per second), subtracted from each workload
 i0=$(cpu_ticks); sleep 10; i1=$(cpu_ticks)
 IDLE_TPS=$(echo "($i1 - $i0) / 10" | bc -l)
 echo "idle osd cpu: $IDLE_TPS ticks/s" | tee -a "$OUT/leg.txt"
+# SETUP_ONLY=1: leave the cluster running for another tool (osdprofile.sh)
+[ "${SETUP_ONLY:-0}" = 1 ] && exit 0
 
 # ---- workloads ----
+# The ramdisks are 8 GiB: drop each big write pool after use.
 run rw4k rp write -b 4096 -t 64 --no-cleanup
 run rr4k rp rand -t 64
+drop_pool rp
 run ec4k ep write -b 4096 -t 16 --no-cleanup
-run qd1  rp write -b 4096 -t 1 --no-cleanup
+if [ "$VERIFY" = 1 ]; then
+	sleep 2
+	bin/rados -p ep bench 20 seq -t 16 > "$OUT/ec4k-verify.txt" 2>&1 \
+		|| { echo "EC read-back verify FAILED" | tee -a "$OUT/leg.txt"; exit 1; }
+	echo "EC read-back verify: $(awk '/^Total reads made/ {print $NF}' "$OUT/ec4k-verify.txt") objects read and checked" | tee -a "$OUT/leg.txt"
+fi
+drop_pool ep
+run qd1  rq write -b 4096 -t 1 --no-cleanup
 # small object set for the obc cache: 16000 objects over 32 PGs = 500 per PG
 bin/rados -p op bench 120 write -b 4096 -t 64 --max-objects 16000 --run-name small --no-cleanup > "$OUT/ow.bench.txt" 2>&1
 run orr  op rand -t 64 --run-name small
@@ -187,7 +235,7 @@ run orr  op rand -t 64 --run-name small
 bin/rados -p op bench "$((SECS + 4))" rand -t 32 --run-name small > "$OUT/mixr.bench.txt" 2>&1 &
 RD=$!
 sleep 2
-run mixw rp write -b 4096 -t 32 --no-cleanup
+run mixw rq write -b 4096 -t 32 --no-cleanup
 wait "$RD" || true
 grep -E '^(Average IOPS|Average Latency)' "$OUT/mixr.bench.txt" | sed 's/^/reads: /' | tee -a "$OUT/mixw.summary"
 

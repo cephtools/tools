@@ -84,6 +84,11 @@ Workload `orr`: `rados bench rand -t 64` over 16000 objects in a 32-PG pool
   this setup (the OSD op takes 34 µs of the 1.02 ms client latency); what
   does limit it was not measured.
 
+Repeated on the clean layout (pool drops, `results/2026-09-25-ab3.txt`),
+`orr`: hit rate 0.128 → 0.993, OSD CPU per read 57.9 [56.7..58.9] → 51.8
+[50.5..53.2] µs (−10.5%), OSD read latency 35.9 → 29.1 µs (−18.8%): the same
+result.
+
 ## How to observe
 
 - For free: `ceph daemon osd.N perf dump` has `osd.object_ctx_cache_hit` and

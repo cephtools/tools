@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | Area | op queue (`OSD::ShardedOpWQ::_enqueue`, `ContextQueue::queue`) |
-| Change | small, but must not undo `d1cf3fb80bc` |
-| Expected gain | CPU and `shard_lock` contention per op; low-QD latency |
+| Change | small (switch 05 in `common/measurement-switches.patch`); must not undo `d1cf3fb80bc` |
+| Expected gain | measured: OSD CPU per op −6% to −15% in every workload, context switches −17% to −40% (except the small-set read, −1%), queue-depth-1 latency −7% |
 | Risk | medium (lost wakeups) |
-| Status | **mechanism confirmed** with a config-only proxy (2026-09-25); the proxy has a queue-depth-1 regression; the code fix is not built |
+| Status | **confirmed: the code fix is built and measured** (2026-09-25); unlike the config-only proxy it has no queue-depth-1 regression |
 
 ## Summary
 
@@ -46,9 +46,44 @@ the patch 263.5k.
   condition variable, and if the only idle thread is the owner, notify the
   owner's variable. Otherwise a new item waits until a busy thread finishes
   its op, which is the low-QD latency this change is meant to remove.
+- Count the wakeups already sent (`wake_pending_workers`,
+  `wake_pending_owner`): a thread that was signalled stays counted as
+  sleeping until it re-takes the lock, so without this a second item can
+  signal nobody (the lost wakeup the first review found). Every thread calls
+  `woke_up()` after its wait returns.
+- The owner must not start a timed wait (for a future mClock item) while
+  commit callbacks are queued: their wakeup may have come before the wait.
 - `stop_waiting` and the drain paths must signal both variables.
 
-## Measured
+## Measured: the code fix (switch 05)
+
+3 BlueStore OSDs on brd ramdisks, 3 interleaved rounds, 30 s per workload;
+raw output and per-round values in `results/2026-09-25-ab3.txt`. Default
+layout (8 shards × 2 threads).
+
+| workload | OSD CPU / op, stock → switch 05 | `tp_osd_tp` context switches / op | other |
+|---|---|---|---|
+| `rw4k` 4k write -t 64 | 659 [633..683] → 592 [578..605] µs (−10.2%) | 12.1 → 7.3 (−40%) | |
+| `rr4k` 4k read -t 64 | 89.0 [86.9..90.9] → 75.5 [73.5..77.0] µs (−15.1%) | 2.81 → 1.98 (−29%) | |
+| `ec4k` EC write | 1017 [990..1052] → 937 [919..951] µs (−7.9%) | 16.5 → 12.9 (−22%) | |
+| `qd1` 4k write -t 1 | 921 [891..945] → 865 [846..889] µs (−6.2%) | 11.7 → 8.5 (−28%) | IOPS +7.6%, client latency −7.2%, OSD write latency −9.2% |
+| `orr` 4k read, small set | 57.9 [56.7..58.9] → 52.3 [50.4..53.8] µs (−9.6%) | ≈ 0 | |
+| `mixw` mixed | 905 [895..919] → 827 [822..833] µs (−8.6%) | 11.5 → 9.6 (−17%) | |
+
+- The CPU ranges do not overlap stock in any workload.
+- The queue-depth-1 regression of the 16×1 proxy (below) is gone: at QD1 the
+  fix uses less CPU (ranges do not overlap), and IOPS and latency are a little
+  better (+7.6% / −7.2%, ranges overlap).
+- Client IOPS at queue depth 64 did not go up (`rw4k` −2.6%, `rr4k` −5.6%,
+  ranges overlap). In this 3-OSD setup OSD CPU is not what limits client
+  IOPS; what does was not measured.
+- The fix was reviewed twice. The first review found a lost wakeup (a thread
+  that was signalled but had not yet re-taken the lock was still counted as
+  asleep, so a second item could signal nobody); it is fixed by counting the
+  wakeups in flight (`wake_pending_*`). The recheck checked that pending can
+  never count too high, so a real sleeper is never skipped.
+
+## Measured: config-only proxy
 
 Setup: as in record 03 (3 BlueStore OSDs on brd ramdisks, 3 interleaved
 rounds, 30 s per workload), with the pool drops that keep the ramdisks from
@@ -68,13 +103,12 @@ thread per shard, a wakeup can only reach the thread that has the work.
 | `ec4k` EC write | 16.6 → 11.2 (−33%) | 973 → 924 µs (−5.0%) | |
 | **`qd1` 4k write -t 1** | 11.7 → 8.1 (−31%) | +3.1% | **IOPS 2086 → 1017 (−51%), OSD write latency 385 → 897 µs**, in all 3 rounds |
 
-- The CPU ranges do not overlap the stock ranges: fewer wakeups, less CPU,
-  as the theory says.
+- The CPU ranges do not overlap the stock ranges, except at queue depth 1
+  (below): fewer wakeups, less CPU, as the theory says.
 - But the proxy is not a fix: at queue depth 1 it doubles the latency. The
-  extra ~500 µs per op looks like waiting, not CPU; the cause is not known
-  yet (to check with an off-CPU trace of `tp_osd_tp`). The code change above
-  (one wakeup per item, a separate wakeup for the owner thread) keeps 2
-  threads per shard and still has to be built and measured.
+  extra ~500 µs per op looks like waiting, not CPU; the cause was not
+  investigated. The code fix, which keeps 2 threads per shard, is measured
+  above and has no such regression.
 
 ## How to observe
 

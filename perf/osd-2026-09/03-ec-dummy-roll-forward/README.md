@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | Area | EC write pipeline (`ECCommon::RMWPipeline::finish_rmw`) |
-| Change | small (a timer) |
+| Change | small: a PG-timer callback plus a queued PG work item (`common/measurement-switches.patch`, `CEPH_PERF_EC_RF_DELAY_MS`) |
 | Expected gain | at low per-PG queue depth, up to one extra round per client write removed: about 3 sub-write messages and replies, and 3–4 KV commits (the written shards, the primary's own included) (estimate) |
 | Risk | medium (rollback window) |
-| Status | **confirmed** (upper bound measured, 2026-09-25); the timer version is not yet built |
+| Status | **confirmed; the fix is built and measured** (2026-09-25): it keeps the whole upper-bound gain on `ec4k` |
 
 ## Summary
 
@@ -45,7 +45,7 @@ Checked in `ECCommon.cc` and `ECBackend.cc`:
 The dummy costs no client latency, because it is sent after the reply. It costs
 load: messages, KV commits and PG-lock rounds on each shard.
 
-## Measured
+## Measured: upper bound
 
 Setup: v21.3.0 RelWithDebInfo with `common/measurement-switches.patch`,
 vstart, 3 BlueStore OSDs on brd ramdisks (the device is not the bottleneck,
@@ -70,36 +70,79 @@ unsafe and only for measurement. Workload `ec4k`: `rados bench write -b 4096
 - The ranges do not overlap.
 - A write touches 3 shards, so 2.18 extra transactions per write means the
   dummy followed about 73% of the writes, as the theory said.
-- A real fix (the delayed dummy below) keeps part of the dummy's cost, so its
-  gain lies between the two columns.
+- This first run had no pool drops, so the ramdisks were filling up during
+  it; the repeat on the clean layout (below) gave a larger IOPS gain (+18.5%).
+
+## Measured: the fix
+
+3 BlueStore OSDs on brd ramdisks, 3 interleaved rounds, 30 s per workload,
+pool drops between the big workloads; raw output and per-round values in
+`results/2026-09-25-ab3.txt`. Noise, judged from legs that cannot affect a
+workload: OSD CPU per op a few percent, client IOPS up to ~15%.
+
+Delayed roll-forward v2 at 100 ms, workload `ec4k` (4k writes to an EC k=2
+m=1 pool, `-t 16`):
+
+| | stock | delayed 100 ms (the fix) | dummy off (upper bound) |
+|---|---|---|---|
+| BlueStore transactions per client write | 5.17 | **3.01** | 3.01 |
+| OSD CPU per client write | 1017 µs [990..1052] | **770 µs [753..780] (−24.3%)** | 779 µs (−23.4%) |
+| `tp_osd_tp` context switches per write | 16.5 | 10.2 (−38%) | 10.2 |
+| client IOPS | 17.9k [16.2k..19.0k] | **21.3k [21.1k..21.5k] (+19%)** | 21.3k (+18.5%) |
+| client latency | 0.90 ms | 0.75 ms (−16%) | 0.75 ms |
+
+All five changes are beyond noise (the ranges do not overlap). The A/B legs
+do not verify data; three separate smoke legs with the delayed roll-forward
+on (20 ms v1, then 100 ms v2 with switches 05 and 14; 8–10 s EC write runs)
+read back and compared every EC object they wrote (`VERIFY=1`: 187,735,
+176,635 and 177,179 objects written, the same numbers read and checked), with
+no error.
 
 ## Proposed change
 
-Delay the dummy with a short timer and let the next write do the job:
+Delay the dummy until the PG has been quiet for a while, and let the writes
+in between roll their own shards forward. The measured version (v2) works on
+the PG timer that `ReplicatedBackend` already uses for its delayed
+`pg_committed_to` update (`pct_callback_t`, `ReplicatedBackend.h:418`):
 
 ```
- finish_rmw:  idle && committed_to > can_rollback_to  ->  arm_roll_forward()  (once)
-
- arm_roll_forward():
-   osd->mono_timer.add_event(delay /* 20-100 ms */,
-     [o, epoch, spgid] { o->queue_ec_roll_forward(epoch, spgid); });
-
- on fire (PG queue item, PG lock held):
-   if pg_has_reset_since(epoch): return
-   if extent_cache.idle() && committed_to > can_rollback_to:
-     submit ECDummyOp(pg_committed_to = committed_to)   // today's code, one batch
+ finish_rmw:   idle && op->version > can_rollback_to
+                 remember hoid / trim_to / reqid, rf_last_idle = now
+                 if timer not armed: rf_first_idle = now, arm pg_timer (delay)
+ timer fires   (pg_timer thread, PG lock taken by the timer)
+                 interval changed or not primary      -> return
+                 quiet < delay && now - rf_first_idle < 4 x delay
+                                                      -> re-arm for the rest
+                 else queue a PG work item: schedule_recovery_work(
+                        bless_unlocked_gencontext(...))   (as ECBackend.cc:1060)
+ work item     (op worker, PG lock held)
+                 primary, pending_roll_forward not empty, cache idle,
+                 committed_to > can_rollback_to  -> one dummy for all shards
+ on_change:    cancel the timer
 ```
 
-- The tree already has this pattern: `PG::schedule_renew_lease`
-  (`PG.cc:1620`) goes `mono_timer` → queue a PG item → epoch guard.
-- A write inside the delay carries `pg_committed_to` to the shards it touches.
-  `pending_roll_forward` keeps the others, so one dummy per idle period covers
-  all of them.
-- Risks: the rollback window and the life of generation objects grow by at
-  most the delay. The epoch guard makes a timer from an old interval a no-op.
-- To check: `RMWPipeline::on_change` (`ECCommon.cc:1102`) does not clear
-  `pending_roll_forward` today. Check whether the first write of a new interval
-  (`first_write_in_interval`) covers that.
+- **Wait for quiet:** a dummy is sent once per quiet period, not once per
+  write. Writes during the delay carry `pg_committed_to` to the shards they
+  touch; `pending_roll_forward` keeps the others, so one dummy covers them all.
+- **Cap at 4 × delay:** without it, a steady low-queue-depth stream whose gaps
+  are shorter than the delay would postpone the roll-forward of the shards it
+  does not touch forever.
+- **Not on the timer thread:** the dummy goes down to `queue_transactions`,
+  which can block; `pg_timer` is one thread for all PGs of the OSD, so the
+  timer only queues the work. The blessed context holds a PG reference and is
+  dropped after an interval change.
+- **Correctness** (independent review, 2026-09-25): an acknowledged write can
+  never be rolled back (activation rolls every shard forward to the head);
+  divergent entries after a failure in the window stay rollback-able; scrub
+  skips generation objects; nothing else waits for the dummy. What changes:
+  rollback state, the omap journal and PG log trimming lag by up to the delay
+  (at most 4 × delay, plus the time the queued work item waits in the op
+  queue, where mClock treats it as background work), and non-primary EC
+  shard reads are redirected to the primary for that window.
+- **Before upstreaming:** make the delay an OSD or pool option (the replicated
+  equivalent, `PCT_UPDATE_DELAY`, is in seconds; 100 ms–1 s is sensible), and
+  run an optimized-EC thrash test (`ceph_test_rados` with overwrites and OSD
+  kill/revive).
 
 ## How to observe
 

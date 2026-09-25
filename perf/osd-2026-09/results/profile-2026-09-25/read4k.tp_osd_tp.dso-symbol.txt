@@ -1,0 +1,35 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 53K of event 'cpu/cycles/P'
+# Event count (approx.): 328530093323
+#
+# Overhead  Shared Object         Symbol  IPC   [IPC Coverage]
+# ........  ....................  ...................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+     2.97%  [vdso]  [.] 0x0000000000000989
+     2.85%  [kernel.kallsyms]     [k] entry_SYSRETQ_unsafe_stack
+     1.18%  [kernel.kallsyms]     [k] __pi_memcpy
+     1.10%  ceph-osd  [.] OSD::ShardedOpWQ::_process(unsigned int, unsigned int, ceph::heartbeat_handle_d*)
+     1.09%  [kernel.kallsyms]     [k] futex_wait_setup
+     1.08%  [kernel.kallsyms]     [k] dequeue_entity
+     1.00%  libc.so.6  [.] __GI___pthread_mutex_unlock_usercnt
+     0.98%  ceph-osd  [.] ceph::buffer::v15_2_0::list::iterator_impl<true>::copy(unsigned int, char*)
+     0.80%  libtcmalloc.so.4.6.3  [.] operator new[](unsigned long)
+     0.77%  [kernel.kallsyms]     [k] srso_alias_return_thunk
+     0.74%  [kernel.kallsyms]     [k] srso_alias_safe_ret
+     0.74%  libtcmalloc.so.4.6.3  [.] operator delete[](void*, unsigned long)
+     0.68%  [kernel.kallsyms]     [k] do_syscall_64
+     0.66%  libc.so.6  [.] pthread_mutex_lock@@GLIBC_2.2.5
+     0.62%  ceph-osd  [.] ceph::buffer::v15_2_0::ptr::copy_out(unsigned int, unsigned int, char*) const
+     0.60%  [kernel.kallsyms]     [k] native_queued_spin_lock_slowpath
+     0.58%  ceph-osd  [.] BlueStore::getattr(boost::intrusive_ptr<ObjectStore::CollectionImpl>&, ghobject_t const&, char const*, ceph::buffer::v15_2_0::ptr&)
+     0.57%  [kernel.kallsyms]     [k] entry_SYSCALL_64
+     0.51%  [kernel.kallsyms]     [k] update_load_avg
+
+
+#
+# (Tip: See assembly instructions with percentage: perf annotate <symbol>)
+#

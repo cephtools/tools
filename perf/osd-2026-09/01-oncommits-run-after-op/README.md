@@ -84,9 +84,9 @@ rounds, 30 s per workload), with the pool drops that keep the ramdisks from
 filling. Raw output, including the per-round values:
 `results/2026-09-25-ab2.txt`.
 
-Switch 01 against stock. Averaged over 3 rounds, write latency looked 5–12%
-lower, but that came from one slow stock round (round 3 was slow in three
-workloads). Per round, against stock rounds 1 and 2:
+Switch 01 against stock. Averaged over 3 rounds, write latency in `rw4k`,
+`ec4k` and `mixw` looked 5–12% lower, but that came from one slow stock round
+(round 3 was slow in those three workloads). Per round, against stock rounds 1 and 2:
 
 | workload | stock r1 / r2 | switch 01 r1 / r2 / r3 |
 |---|---|---|

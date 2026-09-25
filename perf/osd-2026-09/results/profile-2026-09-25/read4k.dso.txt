@@ -1,0 +1,24 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 53K of event 'cpu/cycles/P'
+# Event count (approx.): 328530093323
+#
+# Overhead  Shared Object
+# ........  ....................
+#
+    51.50%  [kernel.kallsyms]
+    33.63%  ceph-osd
+     5.81%  libc.so.6
+     4.76%  [vdso]
+     2.90%  libtcmalloc.so.4.6.3
+     1.36%  libstdc++.so.6.0.34
+     0.05%  libaio.so.1.0.1
+     0.00%  libcrypto.so.3.5.7
+
+
+#
+# (Tip: To filter subset of samples with report or script add --time X-Y or --cpu A,B,C or --socket-filter ...)
+#

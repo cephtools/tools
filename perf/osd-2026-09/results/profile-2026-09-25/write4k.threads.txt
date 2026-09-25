@@ -1,0 +1,29 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 239
+#
+# Samples: 161K of event 'cpu/cycles/P'
+# Event count (approx.): 1048027049126
+#
+# Overhead  Command
+# ........  ...............
+#
+    62.20%  tp_osd_tp
+    12.84%  msgr-worker-1
+     8.76%  bstore_kv_sync
+     4.44%  msgr-worker-0
+     3.82%  bstore_kv_final
+     3.70%  bstore_aio
+     2.93%  msgr-worker-2
+     1.29%  OpHistorySvc
+     0.01%  bstore_mempool
+     0.00%  safe_timer
+     0.00%  osd_srv_heartbt
+     0.00%  log
+     0.00%  ceph_timer
+     0.00%  service
+     0.00%  ceph-osd
+#
+# (Tip: If call chains don't work try perf record --call-graph dwarf or --call-graph lbr)
+#

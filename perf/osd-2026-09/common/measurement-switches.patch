@@ -1,6 +1,33 @@
+diff -ruN a/src/msg/async/ProtocolV2.cc b/src/msg/async/ProtocolV2.cc
+--- a/src/msg/async/ProtocolV2.cc	2026-09-25 02:00:13.704347737 -0500
++++ b/src/msg/async/ProtocolV2.cc	2026-09-25 02:00:13.718027569 -0500
+@@ -13,6 +13,7 @@
+ #include "auth/AuthClient.h"
+ #include "auth/AuthServer.h"
+ #include "auth/AuthSessionHandler.h" // for struct DecryptionError
++#include "osd/perf_patch.h"
+ 
+ #define dout_subsys ceph_subsys_ms
+ #undef dout_prefix
+@@ -1511,8 +1512,13 @@
+ 
+   bool need_dispatch_writer = false;
+   if (!connection->policy.lossy) {
+-    ack_left++;
+-    need_dispatch_writer = true;
++    // perf/osd-2026-09 record 14 (switch 14): do not wake the writer just to
++    // send a standalone AckFrame for every message; the ack rides on the
++    // next outgoing message (write_message sends in_seq), and a standalone
++    // ack goes out only after 32 unacked messages.  Measurement only: an
++    // idle connection keeps up to 31 messages unacked.
++    const auto left = ++ack_left;
++    need_dispatch_writer = !perf_patch(14) || left >= 32;
+   }
+ 
+   state = READY;
 diff -ruN a/src/osd/ECCommon.cc b/src/osd/ECCommon.cc
 --- a/src/osd/ECCommon.cc	2026-09-24 19:25:18.884459424 -0500
-+++ b/src/osd/ECCommon.cc	2026-09-24 19:25:18.987506897 -0500
++++ b/src/osd/ECCommon.cc	2026-09-25 02:11:20.133755273 -0500
 @@ -27,6 +27,7 @@
  #include "ECMsgTypes.h"
  #include "PGLog.h"
@@ -9,7 +36,7 @@ diff -ruN a/src/osd/ECCommon.cc b/src/osd/ECCommon.cc
  
  #define dout_context cct
  #define dout_subsys ceph_subsys_osd
-@@ -1072,7 +1073,10 @@
+@@ -1072,35 +1073,112 @@
  
    op->cache_ops.clear();
  
@@ -20,10 +47,194 @@ diff -ruN a/src/osd/ECCommon.cc b/src/osd/ECCommon.cc
 +  if (extent_cache.idle() && !perf_patch(3)) {
      if (op->version > get_parent()->get_log().get_can_rollback_to()) {
        dout(20) << __func__ << " cache idle " << op->version << dendl;
-       // submit a dummy, transaction-empty op to kick the rollforward
+-      // submit a dummy, transaction-empty op to kick the rollforward
+-      const auto tid = get_parent()->get_tid();
+-      const auto nop = std::make_shared<ECDummyOp>(*this);
+-      nop->hoid = op->hoid;
+-      nop->trim_to = op->trim_to;
+-      nop->pg_committed_to = op->version;
+-      nop->tid = tid;
+-      nop->reqid = op->reqid;
+-      nop->pending_cache_ops = 1;
+-      nop->pipeline = this;
+-
+-      tid_to_op_map[tid] = nop;
+-      waiting_commit.push_back(nop);
+-
+-      /* The cache is idle (we checked above) and this IO never blocks for reads
+-       * so we can skip the extent cache and immediately call the completion.
+-       */
+-      nop->cache_ready(nop->hoid, ECUtil::shard_extent_map_t(&sinfo));
++#ifndef WITH_CRIMSON
++      if (const unsigned ms = perf_ec_rf_delay_ms(); ms > 0) {
++        rf_hoid = op->hoid;
++        rf_trim_to = op->trim_to;
++        rf_reqid = op->reqid;
++        rf_last_idle = ceph::coarse_mono_clock::now();
++        if (!rf_callback.is_scheduled()) {
++          rf_first_idle = rf_last_idle;
++          rf_armed_reset_epoch = get_parent()->get_last_peering_reset_epoch();
++          get_parent()->get_pg_timer().schedule_after(
++            rf_callback, std::chrono::milliseconds(ms));
++        }
++      } else
++#endif
++      submit_rollforward_dummy(op->hoid, op->trim_to, op->version, op->reqid);
+     }
+   }
+ 
+   tid_to_op_map.erase(op->tid);
+ }
+ 
++void ECCommon::RMWPipeline::submit_rollforward_dummy(
++    const hobject_t &hoid,
++    const eversion_t &trim_to,
++    const eversion_t &pg_committed_to,
++    const osd_reqid_t &reqid) {
++  // submit a dummy, transaction-empty op to kick the rollforward
++  const auto tid = get_parent()->get_tid();
++  const auto nop = std::make_shared<ECDummyOp>(*this);
++  nop->hoid = hoid;
++  nop->trim_to = trim_to;
++  nop->pg_committed_to = pg_committed_to;
++  nop->tid = tid;
++  nop->reqid = reqid;
++  nop->pending_cache_ops = 1;
++  nop->pipeline = this;
++
++  tid_to_op_map[tid] = nop;
++  waiting_commit.push_back(nop);
++
++  /* The cache is idle (checked by the caller) and this IO never blocks for
++   * reads so we can skip the extent cache and immediately call the completion.
++   */
++  nop->cache_ready(nop->hoid, ECUtil::shard_extent_map_t(&sinfo));
++}
++
++#ifndef WITH_CRIMSON
++void ECCommon::RMWPipeline::delayed_rollforward_fire() {
++  // pg_timer thread, PG lock held (taken by intrusive_timer); keep it short
++  if (get_parent()->get_last_peering_reset_epoch() != rf_armed_reset_epoch ||
++      !get_parent()->pgb_is_primary()) {
++    return;
++  }
++  // wait until the PG has been quiet for the whole delay: re-arm for the
++  // rest while writes keep finishing (is_scheduled() is false in invoke()),
++  // but not longer than 4 x delay in total, so that a steady stream of
++  // writes that leave the PG idle only briefly cannot postpone the
++  // roll-forward of the shards they do not touch forever
++  const auto delay = std::chrono::milliseconds(perf_ec_rf_delay_ms());
++  const auto now = ceph::coarse_mono_clock::now();
++  const auto quiet = now - rf_last_idle;
++  if (quiet < delay && now - rf_first_idle < 4 * delay) {
++    get_parent()->get_pg_timer().schedule_after(rf_callback, delay - quiet);
++    return;
++  }
++  // submit from an op worker: the dummy goes down to queue_transactions,
++  // which may block and must not hold up the OSD-wide pg_timer thread.
++  // The blessed context holds a PG ref and is dropped on an interval change.
++  get_parent()->schedule_recovery_work(
++    get_parent()->bless_unlocked_gencontext(
++      make_gen_lambda_context<ThreadPool::TPHandle&>(
++        [this](ThreadPool::TPHandle &) { delayed_rollforward_submit(); })
++        .release()),
++    1);
++}
++
++void ECCommon::RMWPipeline::delayed_rollforward_submit() {
++  // op worker, PG lock held
++  if (!get_parent()->pgb_is_primary() || pending_roll_forward.empty()) {
++    // nothing to roll forward (a dummy with no shard to send to would only
++    // wait in waiting_commit until the next sub-write reply reaps it)
++    return;
++  }
++  if (extent_cache.idle() &&
++      committed_to > get_parent()->get_log().get_can_rollback_to()) {
++    dout(20) << __func__ << " delayed roll forward to " << committed_to
++             << dendl;
++    submit_rollforward_dummy(rf_hoid, rf_trim_to, committed_to, rf_reqid);
++  }
++  // else a write is in flight: its finish_rmw re-arms the timer
++}
++#endif
++
+ void ECCommon::RMWPipeline::on_change() {
+   dout(10) << __func__ << dendl;
++#ifndef WITH_CRIMSON
++  if (rf_callback.is_scheduled()) {
++    get_parent()->get_pg_timer().cancel(rf_callback);
++  }
++#endif
+ 
+   completed_to = eversion_t();
+   committed_to = eversion_t();
+diff -ruN a/src/osd/ECCommon.h b/src/osd/ECCommon.h
+--- a/src/osd/ECCommon.h	2026-09-24 21:58:37.402893018 -0500
++++ b/src/osd/ECCommon.h	2026-09-25 02:11:20.133141935 -0500
+@@ -659,6 +659,34 @@
+     void cache_ready(Op &op);
+     void try_finish_rmw();
+     void finish_rmw(OpRef const &op);
++    void submit_rollforward_dummy(const hobject_t &hoid,
++                                  const eversion_t &trim_to,
++                                  const eversion_t &pg_committed_to,
++                                  const osd_reqid_t &reqid);
++#ifndef WITH_CRIMSON
++    // Delayed roll-forward (perf/osd-2026-09 record 03): instead of a dummy
++    // op after every write that leaves the PG idle, wait until the PG has
++    // been quiet for the delay; writes meanwhile roll their own shards
++    // forward, and one dummy covers the rest.  The PG timer only decides
++    // when; the dummy is submitted from an op worker.
++    void delayed_rollforward_fire();    // pg_timer thread, PG lock held
++    void delayed_rollforward_submit();  // op worker, PG lock held
++    ceph::coarse_mono_time rf_last_idle;  ///< last idle finish needing roll-forward
++    ceph::coarse_mono_time rf_first_idle; ///< when this wait began (cap: 4 x delay)
++    hobject_t rf_hoid;
++    eversion_t rf_trim_to;
++    osd_reqid_t rf_reqid;
++    epoch_t rf_armed_reset_epoch = 0;
++    struct rf_callback_t final : public common::intrusive_timer::callback_t {
++      RMWPipeline *pipeline;
++      explicit rf_callback_t(RMWPipeline *p) : pipeline(p) {}
++      void lock() override { pipeline->get_parent()->pg_lock(); }
++      void unlock() override { pipeline->get_parent()->pg_unlock(); }
++      void add_ref() override { pipeline->get_parent()->pg_add_ref(); }
++      void dec_ref() override { pipeline->get_parent()->pg_dec_ref(); }
++      void invoke() override { pipeline->delayed_rollforward_fire(); }
++    } rf_callback{this};
++#endif
+ 
+     void on_change();
+     void on_change2();
+diff -ruN a/src/osd/ECListener.h b/src/osd/ECListener.h
+--- a/src/osd/ECListener.h	2026-09-24 21:58:37.399923684 -0500
++++ b/src/osd/ECListener.h	2026-09-24 21:58:37.419199498 -0500
+@@ -17,6 +17,7 @@
+ 
+ #ifndef WITH_CRIMSON
+ #include "osd_internal_types.h"
++#include "common/intrusive_timer.h"
+ #endif
+ #include "OSDMap.h"
+ #include "common/WorkQueue.h"
+@@ -118,6 +119,14 @@
+   virtual void schedule_recovery_work(
+     GenContext<ThreadPool::TPHandle&> *c,
+     uint64_t cost) = 0;
++
++  // For a delayed EC roll-forward on the PG timer (perf/osd-2026-09 record
++  // 03).  PrimaryLogPG already implements these for PGBackend::Listener.
++  virtual void pg_lock() { ceph_abort(); }
++  virtual void pg_unlock() { ceph_abort(); }
++  virtual void pg_add_ref() { ceph_abort(); }
++  virtual void pg_dec_ref() { ceph_abort(); }
++  virtual common::intrusive_timer &get_pg_timer() { ceph_abort(); }
+ #endif
+ 
+   virtual epoch_t get_interval_start_epoch() const = 0;
 diff -ruN a/src/osd/OSD.cc b/src/osd/OSD.cc
 --- a/src/osd/OSD.cc	2026-09-24 19:25:18.860724804 -0500
-+++ b/src/osd/OSD.cc	2026-09-24 19:25:18.985672514 -0500
++++ b/src/osd/OSD.cc	2026-09-25 01:52:47.144761856 -0500
 @@ -164,6 +164,7 @@
  #endif
  
@@ -32,7 +243,82 @@ diff -ruN a/src/osd/OSD.cc b/src/osd/OSD.cc
  
  
  #define dout_context cct
-@@ -11251,6 +11252,12 @@
+@@ -10814,7 +10815,12 @@
+   }
+   if (queued) {
+     std::lock_guard l{sdata_wait_lock};
+-    if (queued == 1)
++    if (perf_patch(5)) {
++      if (queued == 1)
++	wake_one_for_item();
++      else
++	wake_all();
++    } else if (queued == 1)
+       sdata_cond.notify_one();
+     else
+       sdata_cond.notify_all();
+@@ -11029,7 +11035,10 @@
+ 	NullEvt())));
+ 
+   std::lock_guard l{sdata_wait_lock};
+-  sdata_cond.notify_one();
++  if (perf_patch(5))
++    wake_one_for_item();
++  else
++    sdata_cond.notify_one();
+ }
+ 
+ void OSDShard::unprime_split_children(spg_t parent, unsigned old_pg_num)
+@@ -11073,7 +11082,7 @@
+     scheduler(ceph::osd::scheduler::make_scheduler(
+       cct, osd->whoami, osd->num_shards, id, osd->store->is_rotational(),
+       osd->store->get_type(), osd_op_queue, osd_op_queue_cut_off)),
+-    context_queue(sdata_wait_lock, sdata_cond),
++    context_queue(sdata_wait_lock, perf_patch(5) ? owner_cond : sdata_cond),
+     ec_extent_cache_lru(cct->_conf.get_val<uint64_t>(
+       "ec_extent_cache_size"))
+ {
+@@ -11134,7 +11143,16 @@
+       dout(20) << __func__ << " empty q, waiting" << dendl;
+       osd->cct->get_heartbeat_map()->clear_timeout(hb);
+       sdata->shard_lock.unlock();
+-      sdata->sdata_cond.wait(wait_lock);
++      if (perf_patch(5)) {
++	auto &cond = is_smallest_thread_index ?
++	  sdata->owner_cond : sdata->sdata_cond;
++	++(is_smallest_thread_index ?
++	   sdata->sleeping_owner : sdata->sleeping_workers);
++	cond.wait(wait_lock);
++	sdata->woke_up(is_smallest_thread_index);
++      } else {
++	sdata->sdata_cond.wait(wait_lock);
++      }
+       wait_lock.unlock();
+       sdata->shard_lock.lock();
+       if (sdata->scheduler->empty() &&
+@@ -11199,7 +11217,20 @@
+       osd->cct->get_heartbeat_map()->clear_timeout(hb);
+       sdata->shard_lock.unlock();
+       ++sdata->waiting_threads;
+-      sdata->sdata_cond.wait_until(wait_lock, future_time);
++      if (perf_patch(5)) {
++	// the owner must not sleep past commits queued while it ran the
++	// oncommits above (their notify came before this wait)
++	if (!(is_smallest_thread_index && !sdata->context_queue.empty())) {
++	  auto &cond = is_smallest_thread_index ?
++	    sdata->owner_cond : sdata->sdata_cond;
++	  ++(is_smallest_thread_index ?
++	     sdata->sleeping_owner : sdata->sleeping_workers);
++	  cond.wait_until(wait_lock, future_time);
++	  sdata->woke_up(is_smallest_thread_index);
++	}
++      } else {
++	sdata->sdata_cond.wait_until(wait_lock, future_time);
++      }
+       --sdata->waiting_threads;
+       wait_lock.unlock();
+       sdata->shard_lock.lock();
+@@ -11251,6 +11282,12 @@
      ++slot->num_running;
  
      sdata->shard_lock.unlock();
@@ -45,10 +331,130 @@ diff -ruN a/src/osd/OSD.cc b/src/osd/OSD.cc
      osd->service.maybe_inject_dispatch_delay();
      pg->lock();
      osd->service.maybe_inject_dispatch_delay();
+@@ -11471,7 +11508,11 @@
+ 
+   {
+     std::lock_guard l{sdata->sdata_wait_lock};
+-    if (empty) {
++    if (perf_patch(5)) {
++      // one wakeup per item, to a thread that is asleep (not only on the
++      // empty -> non-empty edge, so a second item wakes a second thread)
++      sdata->wake_one_for_item();
++    } else if (empty) {
+       sdata->sdata_cond.notify_all();
+     } else if (sdata->waiting_threads) {
+       sdata->sdata_cond.notify_one();
+@@ -11509,7 +11550,10 @@
+   sdata->scheduler->enqueue_front(std::move(item));
+   sdata->shard_lock.unlock();
+   std::lock_guard l{sdata->sdata_wait_lock};
+-  sdata->sdata_cond.notify_one();
++  if (perf_patch(5))
++    sdata->wake_one_for_item();
++  else
++    sdata->sdata_cond.notify_one();
+ }
+ 
+ void OSD::ShardedOpWQ::stop_for_fast_shutdown()
+diff -ruN a/src/osd/OSD.h b/src/osd/OSD.h
+--- a/src/osd/OSD.h	2026-09-25 01:48:16.007589548 -0500
++++ b/src/osd/OSD.h	2026-09-25 01:54:46.425378948 -0500
+@@ -993,6 +993,44 @@
+   ceph::mutex sdata_wait_lock;
+   ceph::condition_variable sdata_cond;
+   int waiting_threads = 0;
++  // perf/osd-2026-09 record 05 (switch 05): the commit owner thread sleeps on
++  // owner_cond and ContextQueue wakes only it; an enqueue wakes one sleeping
++  // thread instead of all of them.  All four counters are under
++  // sdata_wait_lock.
++  ceph::condition_variable owner_cond;
++  int sleeping_workers = 0;  ///< non-owner threads in wait/wait_until
++  int sleeping_owner = 0;    ///< owner thread in wait/wait_until (0 or 1)
++  // wakeups sent but not yet taken: a signalled thread stays counted as
++  // sleeping until it re-takes sdata_wait_lock, so without these a second
++  // item arriving meanwhile would signal nobody.
++  int wake_pending_workers = 0;
++  int wake_pending_owner = 0;
++  /// wake one thread that can run a new item; sdata_wait_lock held
++  void wake_one_for_item() {
++    if (sleeping_workers > wake_pending_workers) {
++      ++wake_pending_workers;
++      sdata_cond.notify_one();
++    } else if (sleeping_owner > wake_pending_owner) {
++      ++wake_pending_owner;
++      owner_cond.notify_one();
++    }
++  }
++  /// wake every thread; sdata_wait_lock held
++  void wake_all() {
++    wake_pending_workers = sleeping_workers;
++    wake_pending_owner = sleeping_owner;
++    sdata_cond.notify_all();
++    owner_cond.notify_all();
++  }
++  /// a thread returned from its wait (woken, timed out or spurious);
++  /// sdata_wait_lock held
++  void woke_up(bool owner) {
++    int &sleeping = owner ? sleeping_owner : sleeping_workers;
++    int &pending = owner ? wake_pending_owner : wake_pending_workers;
++    --sleeping;
++    if (pending > 0)
++      --pending;
++  }
+ 
+   ceph::mutex osdmap_lock;  ///< protect shard_osdmap updates vs users w/o shard_lock
+   OSDMapRef shard_osdmap;
+@@ -1777,6 +1815,7 @@
+ 	std::scoped_lock l{sdata->sdata_wait_lock};
+ 	sdata->stop_waiting = true;
+ 	sdata->sdata_cond.notify_all();
++	sdata->owner_cond.notify_all();  // switch 05: the owner may sleep there
+       }
+     }
+ 
+diff -ruN a/src/osd/PeeringState.cc b/src/osd/PeeringState.cc
+--- a/src/osd/PeeringState.cc	2026-09-25 04:10:56.470931005 -0500
++++ b/src/osd/PeeringState.cc	2026-09-25 04:13:53.600331539 -0500
+@@ -22,6 +22,7 @@
+ #include "messages/MOSDPGQuery2.h"
+ #include "messages/MOSDPGLease.h"
+ #include "messages/MOSDPGLeaseAck.h"
++#include "perf_patch.h"
+ 
+ #define dout_context cct
+ #define dout_subsys ceph_subsys_osd
+@@ -5129,6 +5130,27 @@
+ 	cct->_conf->osd_pg_log_trim_max >= cct->_conf->osd_pg_log_trim_min) {
+       return;
+     }
++    if (perf_patch(15)) {
++      // perf/osd-2026-09 switch 15: same result as the loop below, but walk
++      // only to the entry we trim to (~num_to_trim hops) instead of the
++      // loop's max(target+1, num_to_trim) iterations.  Counting from begin()
++      // (the oldest entry), the loop keeps index size-target-1 and trims to
++      // index num_to_trim-1; versions grow from begin() (tail) towards end()
++      // (head), so the smaller index gives the min.
++      const auto &log = pg_log.get_log().log;
++      const size_t n = log.size();
++      if (n <= target) {
++        return;  // the loop would not set by_n_to_keep
++      }
++      const size_t keep_idx = n - target - 1;
++      // num_to_trim == 0 (osd_pg_log_trim_max = 0): the loop trims to index 0
++      const size_t idx = num_to_trim == 0 ? 0 :
++        std::min<size_t>(keep_idx, num_to_trim - 1);
++      pg_trim_to = std::min(std::next(log.begin(), idx)->version, limit);
++      psdout(10) << "pg_trim_to now " << pg_trim_to << dendl;
++      ceph_assert(pg_trim_to <= pg_log.get_head());
++      return;
++    }
+     auto it = pg_log.get_log().log.begin(); // oldest log entry
+     auto rit = pg_log.get_log().log.rbegin();
+     eversion_t by_n_to_keep; // start from tail
 diff -ruN a/src/osd/perf_patch.h b/src/osd/perf_patch.h
 --- a/src/osd/perf_patch.h	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/osd/perf_patch.h	2026-09-24 19:27:55.566379016 -0500
-@@ -0,0 +1,25 @@
++++ b/src/osd/perf_patch.h	2026-09-24 22:48:10.887676524 -0500
+@@ -0,0 +1,37 @@
 +// SPDX-License-Identifier: LGPL-2.1-or-later
 +// Measurement-only switches for the OSD performance study (perf/osd-2026-09).
 +// CEPH_PERF_PATCHES is read once per process, e.g. CEPH_PERF_PATCHES=01,02
@@ -73,6 +479,18 @@ diff -ruN a/src/osd/perf_patch.h b/src/osd/perf_patch.h
 +    return m;
 +  }();
 +  return mask & (1u << n);
++}
++
++// Record 03, delayed roll-forward: CEPH_PERF_EC_RF_DELAY_MS=<ms> delays the EC
++// dummy roll-forward op by <ms>; unset or 0 keeps the stock behaviour.
++inline unsigned perf_ec_rf_delay_ms()
++{
++  static const unsigned ms = [] {
++    const char *s = std::getenv("CEPH_PERF_EC_RF_DELAY_MS");
++    const long v = s ? std::strtol(s, nullptr, 10) : 0;
++    return unsigned(v < 0 ? 0 : v > 10000 ? 10000 : v);  // 0..10 s
++  }();
++  return ms;
 +}
 diff -ruN a/src/osd/PG.cc b/src/osd/PG.cc
 --- a/src/osd/PG.cc	2026-09-24 19:25:18.865620591 -0500

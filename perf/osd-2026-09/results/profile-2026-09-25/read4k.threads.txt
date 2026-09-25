@@ -1,0 +1,27 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 53K of event 'cpu/cycles/P'
+# Event count (approx.): 328530093323
+#
+# Overhead  Command
+# ........  ...............
+#
+    66.51%  tp_osd_tp
+    18.02%  msgr-worker-1
+     8.55%  msgr-worker-0
+     5.30%  bstore_aio
+     1.58%  OpHistorySvc
+     0.04%  bstore_mempool
+     0.01%  safe_timer
+     0.00%  msgr-worker-2
+     0.00%  ceph_timer
+     0.00%  log
+     0.00%  osd_srv_heartbt
+     0.00%  service
+     0.00%  ceph-osd
+#
+# (Tip: To analyze cache line scalability issues use perf c2c record ... ; perf c2c report)
+#
