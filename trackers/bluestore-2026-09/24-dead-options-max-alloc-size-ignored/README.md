@@ -5,8 +5,8 @@
 | Component | bluestore, configuration |
 | Kind | configuration ignored |
 | Severity | minor |
-| Affected | ceph main @ 98fb1cf8c58 |
-| Status | CONFIRMED on c28 2026-09-24 |
+| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
+| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
 
 ## Summary
 - `bluestore_max_alloc_size` ("Maximum size of a single allocation"): `_set_alloc_sizes()`

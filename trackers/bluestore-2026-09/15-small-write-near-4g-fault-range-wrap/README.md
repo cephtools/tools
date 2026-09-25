@@ -5,8 +5,8 @@
 | Component | bluestore |
 | Kind | crash (OSD abort, crash loop on replay) |
 | Severity | minor (needs osd_max_object_size raised near 4 GiB; _do_gc variant > 2 GiB with compression) |
-| Affected | ceph main @ 98fb1cf8c58 |
-| Status | CONFIRMED on c28 2026-09-24 |
+| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
+| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
 
 ## Summary
 `ExtentMap::fault_range(db, uint32_t offset, uint32_t length)` (BlueStore.cc:4335-4349)

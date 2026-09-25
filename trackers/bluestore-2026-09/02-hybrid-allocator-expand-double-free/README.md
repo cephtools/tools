@@ -5,8 +5,8 @@
 | Component | bluestore (allocator) |
 | Kind | data corruption / crash |
 | Severity | major (default `bluestore_allocator=hybrid`) |
-| Affected | ceph main @ 98fb1cf8c58; online expand path 2ab1311f38f / bd6c72e01da (2026) |
-| Status | CONFIRMED on c28 2026-09-24 |
+| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58); online expand path 2ab1311f38f / bd6c72e01da (2026) |
+| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
 
 ## Summary
 Online `bluefs-bdev-expand` calls `alloc->expand(new)` and then

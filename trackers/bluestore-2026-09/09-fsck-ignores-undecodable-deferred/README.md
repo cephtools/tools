@@ -5,9 +5,9 @@
 | Component | bluestore (fsck/repair, deferred replay) |
 | Kind | unrecoverable OSD start failure; fsck false negative |
 | Severity | major |
-| Affected | ceph main @ 98fb1cf8c58 |
+| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
 | Related | tracker 49847 (field report of the mount failure, closed as HW) |
-| Status | CONFIRMED on c28 2026-09-24 |
+| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
 
 ## Summary
 - Regular fsck walks `PREFIX_DEFERRED` ("L") and prints

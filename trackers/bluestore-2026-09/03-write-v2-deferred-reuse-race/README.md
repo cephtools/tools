@@ -5,8 +5,8 @@
 | Component | bluestore (write_v2 / Writer) |
 | Kind | silent data corruption (EIO on read) |
 | Severity | major for `bluestore_write_v2=true` (non-default; randomized in debug builds) |
-| Affected | ceph main @ 98fb1cf8c58 |
-| Status | CONFIRMED on c28 2026-09-24 (v1 control passes) |
+| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
+| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
 
 ## Summary
 `Writer::_defer_or_allocate()` (Writer.cc:1311-1335) reuses space released

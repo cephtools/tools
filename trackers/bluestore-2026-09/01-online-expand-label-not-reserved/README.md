@@ -5,9 +5,9 @@
 | Component | bluestore |
 | Kind | data corruption / data loss, on-disk format |
 | Severity | major (default config: multi-label on, hybrid allocator, NCB) |
-| Affected | ceph main @ 98fb1cf8c58 (2026-09-24); online path from 2ab1311f38f (PR #66344, 2026-06) |
+| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) (2026-09-24); online path from 2ab1311f38f (PR #66344, 2026-06) |
 | Related | tracker 69997 (squid backport 70298) fixed the same class for the offline/NCB mount path (PR 61843 / 62202, 2025); the online path added later by PR #66344 (2026-06) has the defect again and is not covered by that fix |
-| Status | CONFIRMED on c28 2026-09-24 |
+| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
 
 ## Summary
 `ceph tell osd.N bluestore bluefs-bdev-expand` (online, OSD mounted) writes a new

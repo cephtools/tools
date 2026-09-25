@@ -1,7 +1,10 @@
 # BlueStore bug hunt — 2026-09
 
-24 bugs in BlueStore / BlueFS / ceph-bluestore-tool, each **reproduced** on ceph
-`main` @ 98fb1cf8c58 (2026-09-24) with the test or script in its directory.
+24 bugs in BlueStore / BlueFS / ceph-bluestore-tool, each **reproduced** on a clean
+ceph `origin/main` @ 8e6a13e7a9a (2026-09-24; only the test patch applied) with the
+test or script in its directory — see
+[common/verify-origin-main-8e6a13e7a9a.txt](common/verify-origin-main-8e6a13e7a9a.txt),
+produced by [common/verify-all.sh](common/verify-all.sh). Found originally on 98fb1cf8c58.
 Every item was searched on tracker.ceph.com (subject and full-text) and on GitHub
 ceph/ceph PRs and issues in all states (open, merged, closed); none is already reported. Known issues found during the hunt are listed at
 the bottom and are NOT recorded as bugs.

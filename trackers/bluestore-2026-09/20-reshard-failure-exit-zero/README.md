@@ -5,8 +5,8 @@
 | Component | ceph-bluestore-tool |
 | Kind | tool reports success on failure (automation may proceed with a half-resharded / locked DB) |
 | Severity | minor |
-| Affected | ceph main @ 98fb1cf8c58 |
-| Status | CONFIRMED on c28 2026-09-24 |
+| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
+| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
 
 ## Summary
 `bluestore_tool.cc:1397-1403` prints `error resharding: ...` but does not

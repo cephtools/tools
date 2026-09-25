@@ -5,8 +5,8 @@
 | Component | bluestore |
 | Kind | data loss (omap), fsck stray omap |
 | Severity | minor/major (OSD renames temp objects that share the target hash; ObjectStore API allows any) |
-| Affected | ceph main @ 98fb1cf8c58 (since per-pg omap, OMAP_PER_PG) |
-| Status | CONFIRMED on c28 2026-09-24 (memstore passes) |
+| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) (since per-pg omap, OMAP_PER_PG) |
+| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
 
 ## Summary
 Per-pg omap keys embed the object's hash:

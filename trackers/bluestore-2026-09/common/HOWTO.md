@@ -1,11 +1,21 @@
 # Running the reproducers
 
-All reproducers were verified on ceph `main` @ **98fb1cf8c58** (2026-09-24),
+All reproducers were verified on a clean ceph `origin/main` @ **8e6a13e7a9a**
+(2026-09-24) with only `patches/bluestore-bughunt-tests.patch` applied,
 RelWithDebInfo build, file-backed devices on a rotational virtio disk (host c28).
+First found on 98fb1cf8c58.
+
+## One-shot verification
+```
+BUILD=<ceph>/build WORK=/tmp/bh bash common/verify-all.sh        # all
+BUILD=<ceph>/build WORK=/tmp/bh bash common/verify-all.sh 01 04  # selected
+```
+Each reproducer must fail with its bug's signature -> `REPRODUCED`;
+bug 03 also runs a v1 control that must pass (`CONTROL-OK`).
 
 ## gtest reproducers (`test.cc`)
 `patches/bluestore-bughunt-tests.patch` adds every `test.cc` of this directory to
-the ceph tree (applies cleanly to 98fb1cf8c58):
+the ceph tree (applies cleanly to 98fb1cf8c58 and 8e6a13e7a9a):
 
 ```
 cd ceph && git apply /path/to/common/patches/bluestore-bughunt-tests.patch

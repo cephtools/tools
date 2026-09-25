@@ -5,8 +5,8 @@
 | Component | bluefs / ceph-bluestore-tool (revert-wal-to-plain, downgrade-wal-to-v1) |
 | Kind | downgrade tool silently ineffective / abort; on-disk format |
 | Severity | major for downgrades of OSDs that keep the WAL in db/ |
-| Affected | ceph main @ 98fb1cf8c58 |
-| Status | CONFIRMED on c28 2026-09-24 |
+| Affected | ceph main (verified at 8e6a13e7a9a, 2026-09-24; also 98fb1cf8c58) |
+| Status | CONFIRMED on clean ceph origin/main 8e6a13e7a9a (2026-09-24, only the test patch applied; see common/verify-origin-main-8e6a13e7a9a.txt); first found on 98fb1cf8c58 |
 
 ## Summary
 `revert_wal_to_plain()` (BlueFS.cc:2460-2490) hard-codes `"db.wal"`. RocksDB WAL
