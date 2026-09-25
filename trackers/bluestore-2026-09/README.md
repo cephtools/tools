@@ -1,9 +1,9 @@
 # BlueStore bug hunt — 2026-09
 
-25 bugs in BlueStore / BlueFS / ceph-bluestore-tool, each **reproduced** on ceph
+24 bugs in BlueStore / BlueFS / ceph-bluestore-tool, each **reproduced** on ceph
 `main` @ 98fb1cf8c58 (2026-09-24) with the test or script in its directory.
-Every item was searched on tracker.ceph.com (subject keywords) and against open
-PRs; none is already reported. Known issues found during the hunt are listed at
+Every item was searched on tracker.ceph.com (subject and full-text) and on GitHub
+ceph/ceph PRs and issues in all states (open, merged, closed); none is already reported. Known issues found during the hunt are listed at
 the bottom and are NOT recorded as bugs.
 
 See [common/HOWTO.md](common/HOWTO.md) for how to run the reproducers.
@@ -30,16 +30,17 @@ See [common/HOWTO.md](common/HOWTO.md) for how to run the reproducers.
 | 18 | [BlueFS invalidate_cache unaligned length abort](18-bluefs-invalidate-cache-unaligned/) | bluefs | crash | minor | gtest |
 | 19 | [_remove_collection null deref before ENOENT check](19-remove-missing-collection-segfault/) | bluestore | crash | minor | gtest |
 | 20 | [reshard failure exits 0](20-reshard-failure-exit-zero/) | tool | wrong exit code | minor | script |
-| 21 | [NCB recovery frees space beyond bdev_label.size](21-ncb-recovery-beyond-label-size/) | NCB | space accounting | major | gtest |
-| 22 | [fsck_read_bytes_cap=0 deep fsck hang](22-fsck-read-bytes-cap-zero-hang/) | fsck, config | hang | minor | script |
-| 23 | [freelist_blocks_per_key unvalidated](23-freelist-blocks-per-key-unvalidated/) | freelist, config | crash / broken freelist | minor | script + gtest |
-| 24 | [non-pow2 bluefs alloc size aborts](24-bluefs-alloc-size-non-pow2-abort/) | bluefs, config | crash | minor | script |
-| 25 | [bluestore_max_alloc_size & other options ignored](25-dead-options-max-alloc-size-ignored/) | config | config ignored | minor | gtest + static |
+| 21 | [fsck_read_bytes_cap=0 deep fsck hang](21-fsck-read-bytes-cap-zero-hang/) | fsck, config | hang | minor | script |
+| 22 | [freelist_blocks_per_key unvalidated](22-freelist-blocks-per-key-unvalidated/) | freelist, config | crash / broken freelist | minor | script + gtest |
+| 23 | [non-pow2 bluefs alloc size aborts](23-bluefs-alloc-size-non-pow2-abort/) | bluefs, config | crash | minor | script |
+| 24 | [bluestore_max_alloc_size & other options ignored](24-dead-options-max-alloc-size-ignored/) | config | config ignored | minor | gtest + static |
 
 \* `bluestore_write_v2` is off by default (randomized in debug builds).
 
 ## Known / not recorded
 - Offline expand leaks old end padding with the bitmap freelist: already tracker **64567**.
+- NCB allocation recovery frees space up to the physical device size (beyond `bdev_label.size`):
+  overlaps tracker **75852** / PR 68503 (merged; "do not add expanded space to allocator after allocmap recovery").
 - `_deferred_replay` leaves the L key when all extents are eliminated: tracker **68060** (fix reverted).
 - Excluded by scope: 79068, 79141, 72848, 80501, EC/repop aligned-txn work.
 
@@ -51,4 +52,4 @@ See [common/HOWTO.md](common/HOWTO.md) for how to run the reproducers.
 - restore_cfb leaves label copies allocated / loses recovered statfs:
   the gtests hit EOPNOTSUPP from `push_allocation_to_rocksdb()` in the test harness.
 - `_set_csum` briefly sets CSUM_NONE on runtime change (BlueStore.cc:6088): race, not reproduced.
-- write_v2 marks the wrong extent-map shard dirty after lowering the write start: not yet tested.
+- write_v2 marks the wrong extent-map shard dirty after lowering the write start: already addressed by open PR 70615 ("Fix write v2 compressed write missing dirty_range").

@@ -6,7 +6,7 @@
 | Kind | data corruption / data loss, on-disk format |
 | Severity | major (default config: multi-label on, hybrid allocator, NCB) |
 | Affected | ceph main @ 98fb1cf8c58 (2026-09-24); online path from 2ab1311f38f (PR #66344, 2026-06) |
-| Related | tracker 70298 fixed the same class for the offline/NCB path (PR 62202); the new online path regressed it |
+| Related | tracker 69997 (squid backport 70298) fixed the same class for the offline/NCB mount path (PR 61843 / 62202, 2025); the online path added later by PR #66344 (2026-06) has the defect again and is not covered by that fix |
 | Status | CONFIRMED on c28 2026-09-24 |
 
 ## Summary

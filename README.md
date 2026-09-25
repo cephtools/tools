@@ -113,4 +113,4 @@ flush lands in `kv_queued`), microseconds for deferred.
 
 `trackers/` holds bug reports ready for tracker.ceph.com, each with a
 reproducer that was run and confirmed. See `trackers/README.md`;
-`trackers/bluestore-2026-09/` covers 25 BlueStore/BlueFS bugs.
+`trackers/bluestore-2026-09/` covers 24 BlueStore/BlueFS bugs.
