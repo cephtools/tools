@@ -114,3 +114,11 @@ flush lands in `kv_queued`), microseconds for deferred.
 `trackers/` holds bug reports ready for tracker.ceph.com, each with a
 reproducer that was run and confirmed. See `trackers/README.md`;
 `trackers/bluestore-2026-09/` covers 24 BlueStore/BlueFS bugs.
+
+## perf/ — performance studies
+
+`perf/` holds performance studies: where the time goes on a ceph code path and
+which source changes would give it back, each candidate with its theory, the
+proposed change, how to observe it, and the workload. See `perf/README.md`;
+`perf/osd-2026-09/` covers 13 candidates in the classic OSD path (code analysis
+of v21.3.0, not yet measured).
