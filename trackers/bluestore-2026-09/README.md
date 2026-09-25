@@ -1,6 +1,6 @@
 # BlueStore bug hunt — 2026-09
 
-19 bugs in BlueStore / BlueFS / ceph-bluestore-tool that occur in real use, found by
+20 bugs in BlueStore / BlueFS / ceph-bluestore-tool that occur in real use, found by
 code review and reproduced on a clean ceph `origin/main` @ 8e6a13e7a9a (2026-09-24).
 Every item was searched on tracker.ceph.com (subject and full text) and on GitHub
 ceph/ceph PRs and issues in all states; none is already reported. Each report was
@@ -40,6 +40,7 @@ Running and filing: [common/HOWTO.md](common/HOWTO.md).
 | 23 | [non-power-of-2 BlueFS alloc size aborts](23-bluefs-alloc-size-non-pow2-abort/) | minor | option value | real tool |
 | 24 | [bluestore_max_alloc_size and 9 other options have no consumer](24-dead-options-max-alloc-size-ignored/) | minor | any | store-level + static check |
 | 25 | [rm_range_keys ignores the range end when iterator bounds are disabled: other objects' omap deleted](25-rm-range-keys-unbounded-without-iterator-bounds/) | major | osd_rocksdb_iterator_bounds_enabled=false (dev) | live OSD: 20 objects' omap wiped |
+| 26 | [Snapshot copy-on-write of an Octopus-era per-pool omap object aborts the OSD](26-clone-asserts-on-legacy-per-pool-omap/) | major | OSD created on Octopus, not quick-fixed | live OSD: OSD abort |
 
 `bluestore_write_v2` is off by default; it is randomized only with
 `bluestore_write_v2_random=true` (default off) and forced on in some QA objectstore suites.
@@ -50,6 +51,16 @@ See [withdrawn/README.md](withdrawn/README.md):
   06 clone_range with shifted offsets, 19 `_remove_collection` null deref;
 - not demonstrated in real use: 10 BlueFS envelope ino reuse, 17 revert_wal_to_plain
   on pre-Nautilus OSDs, 18 BlueFS `invalidate_cache`.
+
+## Real-workload round (2026-09-25): examined, not recorded
+- `ceph_test_rados` model-checked workload + OSD kill -9 thrash on 3-OSD clusters
+  ([common/workload-thrash.sh](common/workload-thrash.sh)), variants default, compression
+  (lz4, 16K AU) and SSD/NCB: no data mismatch, no OSD assert, deep fsck clean on every OSD.
+- Not reproduced on a live OSD, dropped: GC rewriting snapshot-shared compressed blobs;
+  BlueFS async-discard leak in the NCB allocation file at shutdown (qfsck clean);
+  spillover-cleaner migrate vs unlink race (not hit in 5 rounds, cleaner off by default).
+- Inconclusive: OSD meta-collection (SnapMapper) omap billed to pool 0 in `ceph df`.
+- Crash-consistency review found only the known tracker 68060.
 
 ## Known / not recorded
 - Offline expand leaks old end padding with the bitmap freelist: tracker **64567**.

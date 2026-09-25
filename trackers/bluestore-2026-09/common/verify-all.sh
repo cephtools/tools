@@ -89,5 +89,7 @@ sel 24 && run 24 MaxAllocSizeIgnored 600 $OS --gtest_filter='*/StoreTestSpecific
 
 sel 25 && sh_ 25 live-osd-repro.sh 900 25-rm-range-keys-unbounded-without-iterator-bounds/live-osd-repro.sh -- 'victim keys after \(total\): 0 '
 
+sel 26 && sh_ 26 live-osd-repro.sh 900 26-clone-asserts-on-legacy-per-pool-omap/live-osd-repro.sh -- 'FAILED ceph_assert\(oldo->onode.flags == newo->onode.flags\)'
+
 echo "== summary: $SUMMARY"
 cat "$SUMMARY"
