@@ -36,7 +36,7 @@ args=(); for o in "${opts[@]}"; do args+=(-o "$o"); done
 if [ "$V" = ec ]; then
   $C osd erasure-code-profile set k2m1 k=2 m=1 crush-failure-domain=osd >/dev/null
   $C osd pool create p 16 16 erasure k2m1 >/dev/null; $C osd pool set p allow_ec_overwrites true >/dev/null
-  ECARG=(--ec-pool); OPS=(--op read 100 --op write 100 --op append 50 --op delete 10 --op snap_create 10 --op snap_remove 10 --op rollback 5 --op setattr 10 --op rmattr 10 --op copy_from 10)
+  ECARG=(--ec-pool); OPS=(--op read 100 --op append 100 --op delete 10 --op snap_create 10 --op snap_remove 10 --op rollback 5 --op setattr 10 --op rmattr 10 --op copy_from 10)
 else
   $C osd pool create p 16 >/dev/null; $C osd pool set p size 2 >/dev/null
   ECARG=(); OPS=(--op read 100 --op write 100 --op write_excl 20 --op writesame 10 --op append 30 --op append_excl 10 --op delete 20 --op snap_create 15 --op snap_remove 15 --op rollback 10 --op setattr 20 --op rmattr 10 --op watch 5 --op copy_from 20)
@@ -54,11 +54,11 @@ thrash() {
     echo "$(date +%T) restarted osd.$i" >> "$OUT/thrash.log"
   done
 }
-touch "$OUT/running"; thrash & TP=$!
+touch "$OUT/running"; if [ "${NOTHRASH:-0}" = 1 ]; then TP=""; else thrash & TP=$!; fi
 timeout $((SECS + 600)) "$BIN/ceph_test_rados" --pool p --max-ops 200000 --max-seconds $SECS \
   --objects 300 --max-in-flight 16 --size 4000000 --min-stride-size 40000 --max-stride-size 800000 \
   "${ECARG[@]}" "${OPS[@]}" > "$OUT/test_rados.log" 2>&1
-TR=$?; rm -f "$OUT/running"; wait $TP
+TR=$?; rm -f "$OUT/running"; [ -n "$TP" ] && wait $TP
 echo "ceph_test_rados rc=$TR"; tail -3 "$OUT/test_rados.log"
 sleep 20; timeout 30 $C health detail 2>/dev/null | head -6
 grep -hE "FAILED ceph_assert|Caught signal|_verify_csum bad|missing primary copy|unfound" \

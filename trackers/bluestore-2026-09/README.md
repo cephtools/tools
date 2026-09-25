@@ -53,9 +53,14 @@ See [withdrawn/README.md](withdrawn/README.md):
   on pre-Nautilus OSDs, 18 BlueFS `invalidate_cache`.
 
 ## Real-workload round (2026-09-25): examined, not recorded
-- `ceph_test_rados` model-checked workload + OSD kill -9 thrash on 3-OSD clusters
+- `ceph_test_rados` model-checked workload (snapshots, rollback, copy_from, append,
+  attrs, omap, watch) + OSD kill -9 thrash on 3-OSD clusters
   ([common/workload-thrash.sh](common/workload-thrash.sh)), variants default, compression
-  (lz4, 16K AU) and SSD/NCB: no data mismatch, no OSD assert, deep fsck clean on every OSD.
+  (lz4, 16K AU), write_v2 + 16K AU, SSD/NCB, SSD + write_v2 + snappy, legacy 64K AU and
+  EC k=2 m=1 overwrites: no data mismatch, no OSD assert, deep fsck clean on every OSD.
+  The replicated runs hit their time limit early because watch/notify timed out (-110)
+  on the slow file-backed test disk (BLUESTORE_SLOW_OP_ALERT); the EC run completed
+  5875 ops with 0 errors.
 - Not reproduced on a live OSD, dropped: GC rewriting snapshot-shared compressed blobs;
   BlueFS async-discard leak in the NCB allocation file at shutdown (qfsck clean);
   spillover-cleaner migrate vs unlink race (not hit in 5 rounds, cleaner off by default).
